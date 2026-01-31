@@ -9,7 +9,7 @@ async function sendMsg() {
     chat.innerHTML += `<div class="user">${text}</div>`;
     box.value = "";
 
-    const res = await fetch("https://YOUR-RAILWAY-URL/chat", {
+    const res = await fetch("ai-orchestra-production.up.railway.app", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model, userMessage: text })
