@@ -1,96 +1,62 @@
 import express from "express";
 import cors from "cors";
-import dotenv from "dotenv";
-import OpenAI from "openai";
 import fetch from "node-fetch";
 import { createClient } from "@supabase/supabase-js";
-
+import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Supabase init
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+// ==== Supabase ====
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_KEY
+);
 
-// OpenAI client
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
+// ==== Test route ====
+app.get("/", (req, res) => {
+  res.send("AI Orchestra backend is running");
 });
 
-// DeepSeek call (ручна реалізація через fetch)
-async function callDeepSeek(messages) {
-  const res = await fetch("https://api.deepseek.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${process.env.DEEPSEEK_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "deepseek-chat",
-      messages
-    })
-  });
+app.get("/test", (req, res) => {
+  res.send("Backend OK");
+});
 
-  const json = await res.json();
-  return json.choices[0].message.content;
-}
-
-// ========== ROUTE: chat ============
-app.post("/chat", async (req, res) => {
+// ==== Main API ====
+app.post("/api/chat", async (req, res) => {
   try {
     const { model, userMessage } = req.body;
 
-    let fullReply = "";
-
-    // -------- OPENAI (4o / 5.1) --------
-    if (model === "4o" || model === "gpt4o-latest") {
-      const response = await openai.chat.completions.create({
-        model: "gpt-4o",
+    // CALL OPENAI API
+    const oaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model,
         messages: [{ role: "user", content: userMessage }]
-      });
-      fullReply = response.choices[0].message.content;
+      })
+    });
 
-      await supabase.from("memory_4o").insert({
-        user_message: userMessage,
-        model_reply: fullReply
-      });
-    }
+    const data = await oaiRes.json();
+    const reply = data?.choices?.[0]?.message?.content || "No reply";
 
-    if (model === "5.1") {
-      const response = await openai.chat.completions.create({
-        model: "gpt-5.1",
-        messages: [{ role: "user", content: userMessage }]
-      });
-      fullReply = response.choices[0].message.content;
+    // Save to Supabase
+    await supabase.from("memory_" + model).insert({
+      user_message: userMessage,
+      model_reply: reply
+    });
 
-      await supabase.from("memory_51").insert({
-        user_message: userMessage,
-        model_reply: fullReply
-      });
-    }
-
-    // -------- DeepSeek --------
-    if (model === "deepseek") {
-      fullReply = await callDeepSeek([{ role: "user", content: userMessage }]);
-
-      await supabase.from("memory_deepseek").insert({
-        user_message: userMessage,
-        model_reply: fullReply
-      });
-    }
-
-    return res.json({ reply: fullReply });
-
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ error: e.message });
+    res.json({ reply });
+  } catch (err) {
+    res.status(500).json({ error: err.toString() });
   }
 });
 
-// ========== START SERVER ============
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log("Server running on port " + PORT);
-});
+// ==== Railway PORT ====
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => console.log("Server running on port " + PORT));
