@@ -1,29 +1,109 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="uk">
 <head>
     <meta charset="UTF-8">
     <title>AI Orchestra</title>
     <link rel="stylesheet" href="style.css">
+
+    <style>
+        body {
+            background: #111;
+            margin: 0;
+            font-family: Arial;
+        }
+
+        h1 {
+            color: white;
+            text-align: center;
+            padding: 20px;
+        }
+
+        #controls {
+            text-align: center;
+            margin-bottom: 10px;
+        }
+
+        #controls label {
+            color: white;
+            margin-right: 10px;
+        }
+
+        #controls select {
+            padding: 6px 10px;
+            border-radius: 5px;
+            border: none;
+        }
+
+        #chat {
+            width: 90%;
+            height: 70vh;
+            margin: 0 auto;
+            background: #222;
+            border-radius: 8px;
+            padding: 15px;
+            overflow-y: auto;
+            color: white;
+        }
+
+        #msgBox {
+            width: 90%;
+            margin: 10px auto;
+            display: flex;
+        }
+
+        #msg {
+            flex: 1;
+            padding: 10px;
+            border-radius: 6px;
+            border: none;
+        }
+
+        #sendBtn {
+            width: 60px;
+            margin-left: 10px;
+            border: none;
+            background: #3b82f6;
+            color: white;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+
+        .user {
+            color: #4fc3f7;
+            margin: 10px 0;
+        }
+
+        .bot {
+            color: #90ee90;
+            margin: 10px 0;
+        }
+
+    </style>
+
 </head>
 <body>
 
-<div class="app">
     <h1>AI Orchestra 🎵</h1>
 
-    <select id="model">
-        <option value="4o">GPT-4o (Неван)</option>
-        <option value="5.1">GPT-5.1 (Реон)</option>
-        <option value="deepseek">DeepSeek v3</option>
-    </select>
+    <!-- ⚡ ВИБІР МОДЕЛІ -->
+    <div id="controls">
+        <label>Оберіть модель:</label>
+        <select id="model">
+            <option value="chatgpt-4o-latest">ChatGPT-4o Latest</option>
+            <option value="gpt-5.1-chat-latest">GPT-5.1 Chat Latest</option>
+        </select>
+    </div>
 
+    <!-- ЧАТ -->
     <div id="chat"></div>
 
-    <div class="input-box">
-        <input id="msg" type="text" placeholder="Напиши...">
-        <button onclick="sendMsg()">➤</button>
+    <!-- ПОЛЕ ВВОДУ -->
+    <div id="msgBox">
+        <input id="msg" type="text" placeholder="Напиши..." onkeydown="if(event.key==='Enter') sendMsg()">
+        <button id="sendBtn" onclick="sendMsg()">▶</button>
     </div>
-</div>
 
-<script src="script.js"></script>
+    <script src="script.js"></script>
+
 </body>
 </html>
