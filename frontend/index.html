@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>AI Orchestra</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="app">
+    <h1>AI Orchestra 🎵</h1>
+
+    <select id="model">
+        <option value="4o">GPT-4o (Неван)</option>
+        <option value="5.1">GPT-5.1 (Реон)</option>
+        <option value="deepseek">DeepSeek v3</option>
+    </select>
+
+    <div id="chat"></div>
+
+    <div class="input-box">
+        <input id="msg" type="text" placeholder="Напиши...">
+        <button onclick="sendMsg()">➤</button>
+    </div>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>
