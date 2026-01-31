@@ -20,7 +20,6 @@ app.get("/", (req, res) => {
   res.send("AI Orchestra backend is running");
 });
 
-
 //
 // ===============================
 //       GET MEMORY ON DEMAND
@@ -38,7 +37,7 @@ app.post("/api/memory", async (req, res) => {
         .select("*")
         .order("id", { ascending: false })
         .limit(limit);
-
+      
       if (error) throw error;
       return res.json({ history: data || [] });
     }
@@ -48,8 +47,8 @@ app.post("/api/memory", async (req, res) => {
         .from(table)
         .delete()
         .neq("id", 0);
-
       if (error) throw error;
+
       return res.json({ ok: true });
     }
 
@@ -58,7 +57,6 @@ app.post("/api/memory", async (req, res) => {
     res.status(500).json({ error: err.toString() });
   }
 });
-
 
 //
 // ===============================
@@ -81,6 +79,7 @@ app.post("/api/memory/search", async (req, res) => {
       .or(`user_message.ilike.%${query}%,model_reply.ilike.%${query}%`);
 
     if (error) throw error;
+
     res.json({ results: data || [] });
 
   } catch (err) {
@@ -88,7 +87,6 @@ app.post("/api/memory/search", async (req, res) => {
     res.status(500).json({ error: err.toString() });
   }
 });
-
 
 //
 // ===============================
@@ -98,10 +96,9 @@ app.post("/api/memory/search", async (req, res) => {
 app.post("/api/chat", async (req, res) => {
   try {
     const { model, userMessage } = req.body;
-
     const table = "memory_" + model.replace(/[\.\-]/g, "_");
 
-    // === SPECIAL COMMAND: /search ===
+    // === /search ===
     if (userMessage.startsWith("/search ")) {
       const query = userMessage.replace("/search ", "").trim();
 
@@ -115,39 +112,33 @@ app.post("/api/chat", async (req, res) => {
       if (error) throw error;
 
       return res.json({
-        reply:
-          data.length === 0
-            ? "Нічого не знайдено."
-            : JSON.stringify(data, null, 2)
+        reply: data.length ? JSON.stringify(data, null, 2) : "Нічого не знайдено."
       });
     }
 
-
-    // === SYSTEM PROMPT WITH MEMORY LOGIC ===
+    // === SYSTEM PROMPT ===
     const systemPrompt = `
-You have a long-term memory support.
+You may mark important information for long-term memory.
 
-When generating a reply, you *may* add <<remember>> at the end
-IF information is likely useful in the future.
+Use ONLY this exact marker at the END of a reply:
+[[remember]]
 
-Use <<remember>> for:
-• stable personal preferences
-• personal biographical facts
-• long-term commitments or values
-• important emotional boundaries
-• anything that may be important for the future interaction
+Mark things like:
+• stable preferences
+• biography facts the user explicitly shares
+• long-term personal details
+• meaningful emotional boundaries
+• important semantic and conceptual lines
 
-DO NOT use <<remember>> for:
+DO NOT mark:
 • temporary emotions
 • random events
-• accidental phrases
+• anything not useful long-term
 
-Place <<remember>> STRICTLY at the END of your reply when used.
-If not needed, do NOT add it.
-
+Place [[remember]] strictly at the end when needed.
     `;
 
-    // === Load last 30 messages from memory ===
+    // === Load last 30 messages ===
     const { data: history } = await supabase
       .from(table)
       .select("*")
@@ -183,18 +174,24 @@ If not needed, do NOT add it.
     const data = await oaiRes.json();
     let reply = data?.choices?.[0]?.message?.content || "No reply";
 
-
     //
-    // ===== REMEMBER LOGIC =====
+    // ===== FIXED REMEMBER LOGIC =====
     //
-    let rememberFlag = false;
+    const rememberPatterns = [
+      "\\[\\[remember\\]\\]",    // [[remember]]
+      "<remember>",              // <remember>
+      "\\(remember\\)",          // (remember)
+      "\\{remember\\}",          // {remember}
+      "remember_flag"            // fallback
+    ];
 
-    if (reply.includes("<<remember>>")) {
-      rememberFlag = true;
-      reply = reply.replace("<<remember>>", "").trim();
-    }
+    const pattern = new RegExp(rememberPatterns.join("|"), "i");
+    let rememberFlag = pattern.test(reply);
 
-    // === Save response into DB ===
+    // remove marker if any
+    reply = reply.replace(pattern, "").trim();
+
+    // === Save response ===
     await supabase.from(table).insert({
       user_message: userMessage,
       model_reply: reply,
@@ -209,8 +206,7 @@ If not needed, do NOT add it.
   }
 });
 
-
-// ==== Server ====
+// ==== RUN SERVER ====
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () =>
   console.log(`Server running on port ${PORT}`)
