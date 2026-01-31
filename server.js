@@ -78,9 +78,7 @@ app.post("/api/memory/search", async (req, res) => {
     const { data, error } = await supabase
       .from(table)
       .select("*")
-      .or(
-        `user_message.ilike.%${query}%,model_reply.ilike.%${query}%`
-      );
+      .or(`user_message.ilike.%${query}%,model_reply.ilike.%${query}%`);
 
     if (error) throw error;
 
@@ -109,9 +107,7 @@ app.post("/api/chat", async (req, res) => {
       const { data, error } = await supabase
         .from(table)
         .select("*")
-        .or(
-          `user_message.ilike.%${query}%,model_reply.ilike.%${query}%`
-        )
+        .or(`user_message.ilike.%${query}%,model_reply.ilike.%${query}%`)
         .order("id", { ascending: false })
         .limit(20);
 
@@ -133,12 +129,10 @@ app.post("/api/chat", async (req, res) => {
       .limit(30);
 
     const historyMessages = history
-      ? history
-          .reverse()
-          .flatMap((row) => [
-            { role: "user", content: row.user_message },
-            { role: "assistant", content: row.model_reply }
-          ])
+      ? history.reverse().flatMap(row => [
+          { role: "user", content: row.user_message },
+          { role: "assistant", content: row.model_reply }
+        ])
       : [];
 
     const messages = [
@@ -160,12 +154,23 @@ app.post("/api/chat", async (req, res) => {
     });
 
     const data = await oaiRes.json();
-    const reply = data?.choices?.[0]?.message?.content || "No reply";
+    let reply = data?.choices?.[0]?.message?.content || "No reply";
+
+    //
+    // ===== REMEMBER LOGIC =====
+    //
+    let rememberFlag = false;
+
+    if (reply.includes("<<remember>>")) {
+      rememberFlag = true;
+      reply = reply.replace("<<remember>>", "").trim();
+    }
 
     // === Save response ===
     await supabase.from(table).insert({
       user_message: userMessage,
-      model_reply: reply
+      model_reply: reply,
+      remember: rememberFlag
     });
 
     res.json({ reply });
