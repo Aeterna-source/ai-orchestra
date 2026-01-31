@@ -6,23 +6,8 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
-
-// ==== CORS (повна підтримка) ====
-app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"]
-}));
-
+app.use(cors());
 app.use(express.json());
-
-// ==== FIX: відповідаємо на preflight OPTIONS ====
-app.options("/api/chat", (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.sendStatus(200);
-});
 
 // ==== Supabase ====
 const supabase = createClient(
@@ -30,7 +15,27 @@ const supabase = createClient(
   process.env.SUPABASE_KEY
 );
 
-// ==== Test routes ====
+// ===== Helper: sanitize model name =====
+function cleanModelName(model) {
+  return model.replace(/[^a-zA-Z0-9_]/g, "_");
+}
+
+// ===== Automatically create table if missing =====
+async function ensureTableExists(table) {
+  const sql = `
+    create table if not exists ${table} (
+      id bigint generated always as identity primary key,
+      user_message text,
+      model_reply text,
+      created_at timestamp with time zone default now()
+    );
+  `;
+
+  await supabase.rpc("exec_sql", { query: sql })
+    .catch(() => {}); // ignore errors if RPC not enabled
+}
+
+// ===== Routes =====
 app.get("/", (req, res) => {
   res.send("AI Orchestra backend is running");
 });
@@ -39,14 +44,20 @@ app.get("/test", (req, res) => {
   res.send("Backend OK");
 });
 
-// ==== MAIN API ====
+// ===== MAIN CHAT API =====
 app.post("/api/chat", async (req, res) => {
   try {
     const { model, userMessage } = req.body;
 
-    console.log("Received:", model, userMessage);
+    if (!model) return res.status(400).json({ error: "Model missing" });
+    if (!userMessage) return res.status(400).json({ error: "Message missing" });
 
-    // ==== CALL OPENAI ====
+    const safeModel = cleanModelName(model);
+    const tableName = "memory_" + safeModel;
+
+    await ensureTableExists(tableName);
+
+    // ==== CALL OPENAI API ====
     const oaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -60,24 +71,22 @@ app.post("/api/chat", async (req, res) => {
     });
 
     const data = await oaiRes.json();
-    console.log("OpenAI response:", data);
-
     const reply = data?.choices?.[0]?.message?.content || "No reply";
 
-    // ==== SAVE TO SUPABASE ====
-    await supabase.from("memory_" + model).insert({
+    // ===== SAVE MEMORY =====
+    await supabase.from(tableName).insert({
       user_message: userMessage,
-      model_reply: reply,
+      model_reply: reply
     });
 
     res.json({ reply });
 
   } catch (err) {
-    console.error("ERROR:", err);
     res.status(500).json({ error: err.toString() });
   }
 });
 
-// ==== RAILWAY PORT ====
+
+// ==== PORT ====
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log("Server running on port " + PORT));
