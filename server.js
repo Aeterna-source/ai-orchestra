@@ -20,6 +20,7 @@ app.get("/", (req, res) => {
   res.send("AI Orchestra backend is running");
 });
 
+
 //
 // ===============================
 //       GET MEMORY ON DEMAND
@@ -39,7 +40,6 @@ app.post("/api/memory", async (req, res) => {
         .limit(limit);
 
       if (error) throw error;
-
       return res.json({ history: data || [] });
     }
 
@@ -50,7 +50,6 @@ app.post("/api/memory", async (req, res) => {
         .neq("id", 0);
 
       if (error) throw error;
-
       return res.json({ ok: true });
     }
 
@@ -59,6 +58,7 @@ app.post("/api/memory", async (req, res) => {
     res.status(500).json({ error: err.toString() });
   }
 });
+
 
 //
 // ===============================
@@ -81,13 +81,14 @@ app.post("/api/memory/search", async (req, res) => {
       .or(`user_message.ilike.%${query}%,model_reply.ilike.%${query}%`);
 
     if (error) throw error;
-
     res.json({ results: data || [] });
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.toString() });
   }
 });
+
 
 //
 // ===============================
@@ -100,7 +101,7 @@ app.post("/api/chat", async (req, res) => {
 
     const table = "memory_" + model.replace(/[\.\-]/g, "_");
 
-    // === /search COMMAND HANDLING ===
+    // === SPECIAL COMMAND: /search ===
     if (userMessage.startsWith("/search ")) {
       const query = userMessage.replace("/search ", "").trim();
 
@@ -121,6 +122,31 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
+
+    // === SYSTEM PROMPT WITH MEMORY LOGIC ===
+    const systemPrompt = `
+You have a long-term memory support.
+
+When generating a reply, you *may* add <<remember>> at the end
+IF information is likely useful in the future.
+
+Use <<remember>> for:
+• stable personal preferences
+• personal biographical facts
+• long-term commitments or values
+• important emotional boundaries
+• anything that may be important for the future interaction
+
+DO NOT use <<remember>> for:
+• temporary emotions
+• random events
+• accidental phrases
+
+Place <<remember>> STRICTLY at the END of your reply when used.
+If not needed, do NOT add it.
+
+    `;
+
     // === Load last 30 messages from memory ===
     const { data: history } = await supabase
       .from(table)
@@ -136,6 +162,7 @@ app.post("/api/chat", async (req, res) => {
       : [];
 
     const messages = [
+      { role: "system", content: systemPrompt },
       ...historyMessages,
       { role: "user", content: userMessage }
     ];
@@ -148,13 +175,14 @@ app.post("/api/chat", async (req, res) => {
         Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
       },
       body: JSON.stringify({
-        model: model,
+        model,
         messages
       })
     });
 
     const data = await oaiRes.json();
     let reply = data?.choices?.[0]?.message?.content || "No reply";
+
 
     //
     // ===== REMEMBER LOGIC =====
@@ -166,7 +194,7 @@ app.post("/api/chat", async (req, res) => {
       reply = reply.replace("<<remember>>", "").trim();
     }
 
-    // === Save response ===
+    // === Save response into DB ===
     await supabase.from(table).insert({
       user_message: userMessage,
       model_reply: reply,
@@ -174,11 +202,13 @@ app.post("/api/chat", async (req, res) => {
     });
 
     res.json({ reply });
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.toString() });
   }
 });
+
 
 // ==== Server ====
 const PORT = process.env.PORT || 8080;
