@@ -44,7 +44,11 @@ app.post("/api/memory", async (req, res) => {
     }
 
     if (action === "clear") {
-      const { error } = await supabase.from(table).delete().neq("id", 0);
+      const { error } = await supabase
+        .from(table)
+        .delete()
+        .neq("id", 0);
+
       if (error) throw error;
 
       return res.json({ ok: true });
@@ -52,6 +56,37 @@ app.post("/api/memory", async (req, res) => {
 
     return res.status(400).json({ error: "Unknown action" });
   } catch (err) {
+    res.status(500).json({ error: err.toString() });
+  }
+});
+
+//
+// ===============================
+//         MEMORY SEARCH API
+// ===============================
+//
+app.post("/api/memory/search", async (req, res) => {
+  try {
+    const { model, query } = req.body;
+
+    if (!query || !model) {
+      return res.status(400).json({ error: "query and model required" });
+    }
+
+    const table = "memory_" + model.replace(/[\.\-]/g, "_");
+
+    const { data, error } = await supabase
+      .from(table)
+      .select("*")
+      .or(
+        `user_message.ilike.%${query}%,model_reply.ilike.%${query}%`
+      );
+
+    if (error) throw error;
+
+    res.json({ results: data || [] });
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ error: err.toString() });
   }
 });
@@ -66,6 +101,29 @@ app.post("/api/chat", async (req, res) => {
     const { model, userMessage } = req.body;
 
     const table = "memory_" + model.replace(/[\.\-]/g, "_");
+
+    // === /search COMMAND HANDLING ===
+    if (userMessage.startsWith("/search ")) {
+      const query = userMessage.replace("/search ", "").trim();
+
+      const { data, error } = await supabase
+        .from(table)
+        .select("*")
+        .or(
+          `user_message.ilike.%${query}%,model_reply.ilike.%${query}%`
+        )
+        .order("id", { ascending: false })
+        .limit(20);
+
+      if (error) throw error;
+
+      return res.json({
+        reply:
+          data.length === 0
+            ? "Нічого не знайдено."
+            : JSON.stringify(data, null, 2)
+      });
+    }
 
     // === Load last 30 messages from memory ===
     const { data: history } = await supabase
@@ -104,7 +162,7 @@ app.post("/api/chat", async (req, res) => {
     const data = await oaiRes.json();
     const reply = data?.choices?.[0]?.message?.content || "No reply";
 
-    // === Save ===
+    // === Save response ===
     await supabase.from(table).insert({
       user_message: userMessage,
       model_reply: reply
