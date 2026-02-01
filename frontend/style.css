@@ -1,51 +1,126 @@
 body {
-    background: #121212;
-    color: white;
+    background: #f5f5f5; /* світлий фон */
+    color: #222;
     font-family: Arial, sans-serif;
+    margin: 0;
 }
 
-.app {
-    max-width: 600px;
-    margin: 30px auto;
+h1 {
+    color: #222;
+    text-align: center;
+    padding: 20px;
 }
 
+#controls {
+    text-align: center;
+    margin-bottom: 10px;
+}
+
+#controls label {
+    color: #222;
+    margin-right: 10px;
+}
+
+#controls select {
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px solid #ccc;
+    background: white;
+}
+
+/* ЧАТ-КОНТЕЙНЕР */
 #chat {
-    background: #1f1f1f;
-    padding: 10px;
-    min-height: 400px;
-    border-radius: 8px;
+    width: 90%;
+    height: 70vh;
+    margin: 0 auto;
+    background: #ffffff;
+    border-radius: 10px;
+    padding: 15px;
     overflow-y: auto;
+    box-shadow: 0 0 8px rgba(0,0,0,0.15);
 }
 
+/* БУЛЬБАШКИ — ЯК У CHATGPT */
+
+/* повідомлення користувача */
 .user {
-    text-align: right;
-    margin: 6px;
-    color: #87cefa;
+    max-width: 80%;
+    margin: 12px 0 12px auto;
+    background: #d0ebff;
+    padding: 12px 14px;
+    border-radius: 12px;
+    color: #003d66;
+    font-size: 16px;
+    line-height: 1.5;
+    white-space: pre-wrap;
 }
 
+/* повідомлення моделі */
 .bot {
-    text-align: left;
-    margin: 6px;
-    color: #90ee90;
+    max-width: 80%;
+    margin: 12px auto 12px 0;
+    background: #ffffff;
+    padding: 12px 14px;
+    border-radius: 12px;
+    border: 1px solid #ddd;
+    font-size: 16px;
+    line-height: 1.6;
+    color: #222;
+    white-space: pre-wrap;
 }
 
-.input-box {
-    display: flex;
+/* стилі для markdown усередині бот-відповідей */
+
+.bot h1, .bot h2, .bot h3 {
     margin-top: 10px;
+    margin-bottom: 6px;
+    font-weight: bold;
 }
 
-input {
+.bot ul, .bot ol {
+    margin-left: 20px;
+    margin-top: 6px;
+    margin-bottom: 6px;
+}
+
+.bot li {
+    margin-bottom: 4px;
+}
+
+.bot strong {
+    font-weight: bold;
+}
+
+.bot p {
+    margin: 6px 0;
+}
+
+/* ІНПУТ */
+#msgBox {
+    width: 90%;
+    margin: 10px auto;
+    display: flex;
+}
+
+#msg {
     flex: 1;
-    padding: 10px;
-    border-radius: 8px;
-    border: none;
+    padding: 12px;
+    border-radius: 10px;
+    border: 1px solid #bbb;
+    font-size: 16px;
 }
 
-button {
-    padding: 10px 15px;
-    margin-left: 5px;
-    background: #4444dd;
+#sendBtn {
+    padding: 12px 15px;
+    margin-left: 8px;
+    background: #3b82f6;
     color: white;
     border: none;
-    border-radius: 8px;
+    border-radius: 10px;
+    font-size: 16px;
+    cursor: pointer;
+}
+
+#sendBtn:hover {
+    background: #2563eb;
 }
