@@ -1,126 +1,97 @@
+/* ==== БАЗА ==== */
 body {
-    background: #f5f5f5; /* світлий фон */
-    color: #222;
-    font-family: Arial, sans-serif;
+    background: #f5f5f5;
     margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    color: #1e1e1e;
 }
 
 h1 {
-    color: #222;
     text-align: center;
     padding: 20px;
+    color: #1e1e1e;
+    font-weight: 600;
 }
 
-#controls {
-    text-align: center;
-    margin-bottom: 10px;
-}
-
-#controls label {
-    color: #222;
-    margin-right: 10px;
-}
-
-#controls select {
-    padding: 6px 10px;
-    border-radius: 6px;
-    border: 1px solid #ccc;
-    background: white;
-}
-
-/* ЧАТ-КОНТЕЙНЕР */
+/* ==== ЗОНА ЧАТУ ==== */
 #chat {
     width: 90%;
     height: 70vh;
     margin: 0 auto;
     background: #ffffff;
-    border-radius: 10px;
-    padding: 15px;
+    border-radius: 12px;
+    padding: 20px;
     overflow-y: auto;
-    box-shadow: 0 0 8px rgba(0,0,0,0.15);
+    box-shadow: 0 2px 10px rgba(0,0,0,0.06);
 }
 
-/* БУЛЬБАШКИ — ЯК У CHATGPT */
-
-/* повідомлення користувача */
+/* ==== ТИ (користувач) ==== */
 .user {
-    max-width: 80%;
+    max-width: 70%;
     margin: 12px 0 12px auto;
-    background: #d0ebff;
-    padding: 12px 14px;
-    border-radius: 12px;
-    color: #003d66;
+    padding: 12px 16px;
+    background: #d4f3e5;         /* м’яка зелена */
+    color: #064b2f;
+    border-radius: 14px;
     font-size: 16px;
-    line-height: 1.5;
+    line-height: 1.55;
     white-space: pre-wrap;
 }
 
-/* повідомлення моделі */
+/* ==== МОДЕЛЬ ==== */
 .bot {
-    max-width: 80%;
-    margin: 12px auto 12px 0;
-    background: #ffffff;
-    padding: 12px 14px;
-    border-radius: 12px;
-    border: 1px solid #ddd;
-    font-size: 16px;
-    line-height: 1.6;
-    color: #222;
+    max-width: 95%;
+    margin: 16px 0;
+    padding: 4px 0;
+    color: #1e1e1e;
+    font-size: 17px;
+    line-height: 1.62;
     white-space: pre-wrap;
 }
 
-/* стилі для markdown усередині бот-відповідей */
+/* Форматування Markdown у відповіді моделі */
+.bot p { margin: 10px 0; }
 
 .bot h1, .bot h2, .bot h3 {
-    margin-top: 10px;
-    margin-bottom: 6px;
-    font-weight: bold;
+    margin: 15px 0 8px;
+    font-weight: 600;
 }
 
 .bot ul, .bot ol {
-    margin-left: 20px;
-    margin-top: 6px;
-    margin-bottom: 6px;
+    margin: 10px 0 10px 25px;
 }
 
-.bot li {
-    margin-bottom: 4px;
-}
+.bot li { margin-bottom: 6px; }
 
-.bot strong {
-    font-weight: bold;
-}
+.bot strong { font-weight: 700; }
 
-.bot p {
-    margin: 6px 0;
-}
-
-/* ІНПУТ */
+/* ==== ІНПУТ ==== */
 #msgBox {
     width: 90%;
-    margin: 10px auto;
+    margin: 15px auto;
     display: flex;
+    gap: 10px;
 }
 
 #msg {
     flex: 1;
     padding: 12px;
     border-radius: 10px;
-    border: 1px solid #bbb;
+    border: 1px solid #cccccc;
     font-size: 16px;
 }
 
 #sendBtn {
-    padding: 12px 15px;
-    margin-left: 8px;
-    background: #3b82f6;
+    padding: 12px 20px;
+    background: #10a37f;
     color: white;
     border: none;
     border-radius: 10px;
     font-size: 16px;
     cursor: pointer;
+    font-weight: 600;
 }
 
 #sendBtn:hover {
-    background: #2563eb;
+    background: #0e8f70;
 }
