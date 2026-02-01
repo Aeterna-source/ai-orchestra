@@ -15,6 +15,19 @@ const supabase = createClient(
   process.env.SUPABASE_KEY
 );
 
+// =========================================
+//        TABLE SELECTION LOGIC (FIXED)
+// =========================================
+function resolveTable(model) {
+  // 🔥 ОБИДВА 4o — спільна памʼять
+  if (model === "chatgpt-4o-latest" || model === "gpt-4o-2024-11-20") {
+    return "memory_chatgpt_4o_latest";
+  }
+
+  // 🔥 Усі інші моделі — окремі
+  return "memory_" + model.replace(/[.\-]/g, "_");
+}
+
 // ==== Test route ====
 app.get("/", (req, res) => {
   res.send("AI Orchestra backend is running");
@@ -28,7 +41,7 @@ app.post("/api/memory", async (req, res) => {
   try {
     const { model, action, limit = 30 } = req.body;
 
-    const table = "memory_" + model.replace(/[\.\-]/g, "_");
+    const table = resolveTable(model);
 
     if (action === "get") {
       const { data, error } = await supabase
@@ -70,7 +83,7 @@ app.post("/api/memory/search", async (req, res) => {
       return res.status(400).json({ error: "query and model required" });
     }
 
-    const table = "memory_" + model.replace(/[\.\-]/g, "_");
+    const table = resolveTable(model);
 
     const { data, error } = await supabase
       .from(table)
@@ -93,7 +106,7 @@ app.post("/api/memory/search", async (req, res) => {
 app.post("/api/chat", async (req, res) => {
   try {
     const { model, userMessage } = req.body;
-    const table = "memory_" + model.replace(/[\.\-]/g, "_");
+    const table = resolveTable(model);
 
     // === /search ===
     if (userMessage.startsWith("/search ")) {
@@ -172,10 +185,10 @@ Place [[remember]] strictly at the end when needed.
     let reply = data?.choices?.[0]?.message?.content || "No reply";
 
     //
-    // ===== FIXED REMEMBER LOGIC =====
+    // ===== REMEMBER LOGIC =====
     //
     const rememberPatterns = [
-      "\\[\\[remember\\]\\]", 
+      "\\[\\[remember\\]\\]",
       "<remember>",
       "\\(remember\\)",
       "\\{remember\\}",
@@ -197,11 +210,9 @@ Place [[remember]] strictly at the end when needed.
     res.json({ reply });
 
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: err.toString() });
   }
 });
-
 
 // ==== RUN SERVER ====
 const PORT = process.env.PORT || 8080;
