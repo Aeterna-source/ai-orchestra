@@ -140,7 +140,7 @@ function formatMemory(bundle) {
 }
 
 // =====================================
-//      LOAD FALLBACK MEMORY (30 msgs)
+//      LOAD FALLBACK MEMORY (20 msgs)
 // =====================================
 async function loadFallbackHistory(profile) {
   const table = memoryTables[profile].fallback;
