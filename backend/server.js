@@ -149,7 +149,7 @@ async function loadFallbackHistory(profile) {
     .from(table)
     .select("*")
     .order("id", { ascending: false })
-    .limit(30);
+    .limit(20);
 
   if (!data) return [];
 
