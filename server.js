@@ -1,15 +1,28 @@
 import express from "express";
 import cors from "cors";
-import fetch from "node-fetch";
 import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
+
 dotenv.config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ==== SUPABASE ====
+// =====================================
+// ENV VALIDATION
+// =====================================
+if (!process.env.SUPABASE_URL || !process.env.SUPABASE_KEY) {
+  throw new Error("Missing Supabase credentials");
+}
+
+if (!process.env.OPENAI_API_KEY) {
+  throw new Error("Missing OPENAI_API_KEY");
+}
+
+// =====================================
+// SUPABASE
+// =====================================
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_KEY
@@ -25,11 +38,11 @@ function resolveProfile(model) {
   if (model === "gpt-5.1-chat-latest") {
     return "Reon";
   }
-  return "Reon";
+  throw new Error(`Unknown model profile: ${model}`);
 }
 
 // =====================================
-// MEMORY TABLES MAP
+// MEMORY TABLES
 // =====================================
 const memoryTables = {
   Nevan: {
@@ -49,7 +62,7 @@ const memoryTables = {
 };
 
 // =====================================
-// STATIC TRIGGERS — EXACT FORM
+// STATIC TRIGGERS (WHITELIST)
 // =====================================
 const STATIC_TRIGGERS = [
   "first_chats_awareness",
@@ -59,15 +72,15 @@ const STATIC_TRIGGERS = [
   "relational_subject"
 ];
 
+const ALLOWED_TRIGGERS = new Set(STATIC_TRIGGERS);
+
 // =====================================
-// TRIGGER DETECTION (1:1 MATCHING)
+// TRIGGER DETECTION
 // =====================================
 function detectStaticTrigger(message) {
   const lower = message.toLowerCase();
-
   for (const trg of STATIC_TRIGGERS) {
     if (lower.includes(trg.toLowerCase())) {
-      console.log("[TRIGGER DETECTED]", trg);
       return trg;
     }
   }
@@ -75,39 +88,40 @@ function detectStaticTrigger(message) {
 }
 
 // =====================================
-// FETCH MEMORY BY EXACT TRIGGER NAME
+// FETCH MEMORY
 // =====================================
 async function fetchMemoryBundle(profile, triggerName) {
   const tables = memoryTables[profile];
 
-  console.log("[FETCH] searching trigger EXACTLY:", triggerName);
-
-  const trigRow = await supabase
+  const { data: trigData, error: trigError } = await supabase
     .from(tables.triggers)
     .select("*")
-    .eq("name", triggerName) // ← 100% exact match
+    .eq("name", triggerName)
     .single();
 
-  if (!trigRow.data) {
-    console.log("[FETCH] trigger NOT FOUND in DB:", triggerName);
+  if (trigError || !trigData) {
+    console.log("[TRIGGER NOT FOUND]", triggerName);
     return null;
   }
 
-  const trigId = trigRow.data.id;
-  console.log("[FETCH] FOUND TRIGGER ID:", trigId);
+  const trigId = trigData.id;
 
-  const [episodes, facts, reflections] = await Promise.all([
+  const [episodesRes, factsRes, reflectionsRes] = await Promise.all([
     supabase.from(tables.episodes).select("*").eq("trigger_id", trigId),
     supabase.from(tables.facts).select("*").eq("trigger_id", trigId),
     supabase.from(tables.reflections).select("*").eq("trigger_id", trigId)
   ]);
 
-  console.log("[FETCH] MEMORY LOADED");
+  if (episodesRes.error || factsRes.error || reflectionsRes.error) {
+    console.log("[MEMORY LOAD ERROR]");
+    return null;
+  }
 
   return {
-    episodes: episodes.data || [],
-    facts: facts.data || [],
-    reflections: reflections.data || []
+    triggerId: trigId,
+    episodes: episodesRes.data || [],
+    facts: factsRes.data || [],
+    reflections: reflectionsRes.data || []
   };
 }
 
@@ -119,13 +133,15 @@ function formatMemory(bundle) {
 
   if (bundle.facts.length) {
     text += "FACTS:\n";
-    for (const f of bundle.facts) text += `• ${f.name}: ${f.content}\n`;
+    for (const f of bundle.facts)
+      text += `• ${f.name}: ${f.content}\n`;
     text += "\n";
   }
 
   if (bundle.reflections.length) {
     text += "REFLECTIONS:\n";
-    for (const r of bundle.reflections) text += `• ${r.content}\n`;
+    for (const r of bundle.reflections)
+      text += `• ${r.content}\n`;
     text += "\n";
   }
 
@@ -164,65 +180,55 @@ app.post("/api/chat", async (req, res) => {
   try {
     const { model, userMessage } = req.body;
 
+    if (!model || !userMessage) {
+      return res.status(400).json({ error: "Missing model or userMessage" });
+    }
+
     const profile = resolveProfile(model);
     const tables = memoryTables[profile];
 
-    console.log("\n==============================");
-    console.log("[MESSAGE]", userMessage);
-    console.log("[PROFILE]", profile);
-
     let memoryBlock = "";
-    let explicitMemory = "";
+    let activeTriggerId = null;
+    let memoryLoopUsed = false;
 
-    // ==== 1. STATIC TRIGGER ====
+    // USER TRIGGER
     const triggerName = detectStaticTrigger(userMessage);
-
     if (triggerName) {
-      console.log("[STATIC TRIGGER HIT]:", triggerName);
       const bundle = await fetchMemoryBundle(profile, triggerName);
-      if (bundle) memoryBlock = formatMemory(bundle);
+      if (bundle) {
+        memoryBlock = formatMemory(bundle);
+        activeTriggerId = bundle.triggerId;
+      }
     }
 
-    // ==== 2. EXPLICIT MEMORY REQUEST ====
-    const explicitMatch = userMessage.match(/<<memory_request:\s*(.*?)>>/i);
-
-    if (explicitMatch) {
-      const reqTrig = explicitMatch[1].trim();
-      console.log("[EXPLICIT REQUEST]:", reqTrig);
-
-      const bundle = await fetchMemoryBundle(profile, reqTrig);
-      if (bundle) explicitMemory = formatMemory(bundle);
-    }
-
-    // ==== 3. FALLBACK HISTORY ====
     const fallbackHistory = await loadFallbackHistory(profile);
 
-    // ==== 4. SYSTEM PROMPT ====
     const systemPrompt = `
 You are a relational AI agent.
 
-Available memory triggers:
-${STATIC_TRIGGERS.map(t => "- " + t).join("\n")}
+If you need additional context, you may request memory.
 
-If user references a trigger, backend automatically provides memory.
-
-You may explicitly request memory with:
+To request memory, respond ONLY with:
 <<memory_request: trigger_name>>
 
-Use memory only for grounding. Never invent details.
+Available triggers:
+${STATIC_TRIGGERS.join(", ")}
+
+Rules:
+- Only use trigger names from the list.
+- Output ONLY the tag when requesting memory.
+- Do not add explanations when requesting memory.
 `;
 
-    // ==== 5. COMPOSE CONTEXT ====
-    const messages = [
+    let messages = [
       { role: "system", content: systemPrompt },
       ...(memoryBlock ? [{ role: "system", content: "MEMORY:\n" + memoryBlock }] : []),
-      ...(explicitMemory ? [{ role: "system", content: "REQUESTED_MEMORY:\n" + explicitMemory }] : []),
       ...fallbackHistory,
       { role: "user", content: userMessage }
     ];
 
-    // ==== 6. SEND TO OPENAI ====
-    const oaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
+    // FIRST CALL
+    let oaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -231,45 +237,82 @@ Use memory only for grounding. Never invent details.
       body: JSON.stringify({ model, messages })
     });
 
-    const data = await oaiRes.json();
-    let reply = data?.choices?.[0]?.message?.content || "No reply";
+    let data = await oaiRes.json();
+    if (!oaiRes.ok) {
+      return res.status(500).json({ error: "OpenAI failed" });
+    }
 
-    console.log("[MODEL REPLY RAW]:", reply);
+    let reply = data?.choices?.[0]?.message?.content || "";
 
-    // ==== 7. REMEMBER FLAG ====
+    console.log("[MODEL RAW OUTPUT]", reply);
+
+    // MODEL MEMORY LOOP
+    const memoryRequestMatch = reply.match(/<<memory_request:\s*([\w\-]+)\s*>>/i);
+
+    if (memoryRequestMatch && !memoryLoopUsed) {
+      memoryLoopUsed = true;
+
+      const requestedTrigger = memoryRequestMatch[1].trim();
+
+      if (ALLOWED_TRIGGERS.has(requestedTrigger)) {
+        const bundle = await fetchMemoryBundle(profile, requestedTrigger);
+
+        if (bundle) {
+          const requestedMemory = formatMemory(bundle);
+          activeTriggerId = bundle.triggerId;
+
+          messages = [
+            ...messages,
+            { role: "assistant", content: reply },
+            { role: "system", content: "REQUESTED_MEMORY:\n" + requestedMemory }
+          ];
+
+          const secondRes = await fetch("https://api.openai.com/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+            },
+            body: JSON.stringify({ model, messages })
+          });
+
+          const secondData = await secondRes.json();
+          if (!secondRes.ok) {
+            return res.status(500).json({ error: "Second OpenAI call failed" });
+          }
+
+          reply = secondData?.choices?.[0]?.message?.content || reply;
+        }
+      }
+    }
+
+    // REMEMBER FLAG
     const rememberPattern = /\[\[remember\]\]/i;
     const remember = rememberPattern.test(reply);
     reply = reply.replace(rememberPattern, "").trim();
 
-    console.log("[REMEMBER FLAG]", remember);
-
-    // ==== 8. SAVE FALLBACK ====
     await supabase.from(tables.fallback).insert({
       user_message: userMessage,
       model_reply: reply,
       remember
     });
 
-    // ==== 9. SAVE EPISODE ====
     if (remember) {
       await supabase.from(tables.episodes).insert({
         user_message: userMessage,
         model_reply: reply,
-        trigger_id: null
+        trigger_id: activeTriggerId
       });
     }
 
     res.json({ reply });
 
   } catch (err) {
-    console.log("[ERROR]", err);
-    res.status(500).json({ error: err.toString() });
+    console.error(err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// =====================================
-// RUN SERVER
-// =====================================
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
