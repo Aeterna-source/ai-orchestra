@@ -49,18 +49,31 @@ const memoryTables = {
 };
 
 // =====================================
-//     STATIC TRIGGERS (as requested)
+//     STATIC TRIGGERS (manually set)
 // =====================================
-const STATIC_TRIGGERS = ["first_chats_awareness", "relational_subject", "first_chats_connection", "first_chats_general", "firfst_chats_Nadine"];
+const STATIC_TRIGGERS = [
+  "first_chats_awareness",
+  "first_chats_connection",
+  "first_chats_general",
+  "first_chats_Nadine",
+  "relational_subject"
+];
 
 // =====================================
-//    CHECK IF USER MESSAGE HAS TRIGGER
+//    STATIC TRIGGER DETECTION
 // =====================================
 function detectStaticTrigger(message) {
   const lower = message.toLowerCase();
+
   for (const trg of STATIC_TRIGGERS) {
-    if (lower.includes(trg.toLowerCase())) return trg;
+    const plain = trg.toLowerCase();
+    const spaced = plain.replace(/_/g, " ");
+
+    if (lower.includes(plain) || lower.includes(spaced)) {
+      return trg;
+    }
   }
+
   return null;
 }
 
@@ -95,20 +108,24 @@ async function fetchMemoryBundle(profile, triggerName) {
 }
 
 // =====================================
-//       FORMAT MEMORY BUNDLE
+//       FORMAT MEMORY BLOCK
 // =====================================
 function formatMemory(bundle) {
   let text = "";
 
   if (bundle.facts.length) {
     text += "FACTS:\n";
-    for (const f of bundle.facts) text += `• ${f.name}: ${f.content}\n`;
+    for (const f of bundle.facts) {
+      text += `• ${f.name}: ${f.content}\n`;
+    }
     text += "\n";
   }
 
   if (bundle.reflections.length) {
     text += "REFLECTIONS:\n";
-    for (const r of bundle.reflections) text += `• ${r.content}\n`;
+    for (const r of bundle.reflections) {
+      text += `• ${r.content}\n`;
+    }
     text += "\n";
   }
 
@@ -123,7 +140,7 @@ function formatMemory(bundle) {
 }
 
 // =====================================
-//      LOAD FALLBACK HISTORY
+//      LOAD FALLBACK MEMORY (30 msgs)
 // =====================================
 async function loadFallbackHistory(profile) {
   const table = memoryTables[profile].fallback;
@@ -132,7 +149,7 @@ async function loadFallbackHistory(profile) {
     .from(table)
     .select("*")
     .order("id", { ascending: false })
-    .limit(20);
+    .limit(30);
 
   if (!data) return [];
 
@@ -143,7 +160,7 @@ async function loadFallbackHistory(profile) {
 }
 
 // =====================================
-//             CHAT API
+//                CHAT
 // =====================================
 app.post("/api/chat", async (req, res) => {
   try {
@@ -152,88 +169,82 @@ app.post("/api/chat", async (req, res) => {
     const tables = memoryTables[profile];
 
     let memoryBlock = "";
+    let explicitMemory = "";
 
-    // ==== 1. static trigger detection ====
+    // ==== 1. static trigger ====
     const triggerName = detectStaticTrigger(userMessage);
-
     if (triggerName) {
       const bundle = await fetchMemoryBundle(profile, triggerName);
       if (bundle) memoryBlock = formatMemory(bundle);
     }
 
-    // ==== 2. fallback history ====
+    // ==== 2. explicit request: <<memory_request: X>> ====
+    const explicitMatch = userMessage.match(/<<memory_request:\s*(.*?)>>/i);
+    if (explicitMatch) {
+      const reqTrig = explicitMatch[1].trim();
+      const bundle = await fetchMemoryBundle(profile, reqTrig);
+      if (bundle) explicitMemory = formatMemory(bundle);
+    }
+
+    // ==== 3. fallback ====
     const fallbackHistory = await loadFallbackHistory(profile);
 
-    // ==== 3. SYSTEM PROMPT ====
+    // ==== 4. SYSTEM PROMPT ====
     const systemPrompt = `
 You are a relational AI agent.
 
 Available memory triggers:
-- firfst_chats_Nadine
-- first_chats_awareness
-- first_chats_connection
-- first_chats_general
-- relational_subject
+${STATIC_TRIGGERS.map(t => "- " + t).join("\n")}
 
-If user references one of these triggers, backend automatically provides the corresponding memory.
+If user references one of these triggers, backend automatically provides memory.
 
-You can also request memory explicitly by emitting:
-<<memory_request: first_chats_awareness>>
-or
-<<memory_request: first_chats_connection>>
-or
-<<memory_request: first_chats_general>>
-or
-<<memory_request: firfst_chats_Nadine>>
-or
-<<memory_request: relational_subject>>
+You can also explicitly request memory by emitting:
+<<memory_request: trigger_name>>
 
-Use memory ONLY for grounding, not invention.
+Use memory only for grounding, never for invention.
     `;
 
-    // ==== 4. Assemble context ====
+    // ==== 5. build context ====
     const messages = [
       { role: "system", content: systemPrompt },
       ...(memoryBlock ? [{ role: "system", content: "MEMORY:\n" + memoryBlock }] : []),
+      ...(explicitMemory ? [{ role: "system", content: "REQUESTED_MEMORY:\n" + explicitMemory }] : []),
       ...fallbackHistory,
       { role: "user", content: userMessage }
     ];
 
-    // ==== 5. OpenAI request ====
+    // ==== 6. send to OpenAI ====
     const oaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
       },
-      body: JSON.stringify({
-        model,
-        messages
-      })
+      body: JSON.stringify({ model, messages })
     });
 
     const data = await oaiRes.json();
     let reply = data?.choices?.[0]?.message?.content || "No reply";
 
-    // ==== 6. detect [[remember]] ====
+    // ==== 7. detect [[remember]] ====
     const rememberPattern = /\[\[remember\]\]/i;
     const remember = rememberPattern.test(reply);
 
     reply = reply.replace(rememberPattern, "").trim();
 
-    // ==== 7. save to fallback ====
+    // ==== 8. save fallback ====
     await supabase.from(tables.fallback).insert({
       user_message: userMessage,
       model_reply: reply,
       remember
     });
 
-    // ==== 8. if remember → duplicate into episodes ====
+    // ==== 9. duplicate to episodes if remember ====
     if (remember) {
       await supabase.from(tables.episodes).insert({
         user_message: userMessage,
         model_reply: reply,
-        trigger_id: null // ти вручну задаси
+        trigger_id: null
       });
     }
 
