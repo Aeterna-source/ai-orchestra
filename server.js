@@ -70,6 +70,7 @@ function detectStaticTrigger(message) {
     const spaced = plain.replace(/_/g, " ");
 
     if (lower.includes(plain) || lower.includes(spaced)) {
+      console.log("[TRIGGER DETECTED]", trg);
       return trg;
     }
   }
@@ -83,14 +84,18 @@ function detectStaticTrigger(message) {
 async function fetchMemoryBundle(profile, triggerName) {
   const tables = memoryTables[profile];
 
-  // find trigger ID
+  console.log("[FETCH] looking for trigger:", triggerName);
+
   const trigRow = await supabase
     .from(tables.triggers)
     .select("*")
     .eq("name", triggerName)
     .single();
 
-  if (!trigRow.data) return null;
+  if (!trigRow.data) {
+    console.log("[FETCH] trigger not found in DB:", triggerName);
+    return null;
+  }
 
   const trigId = trigRow.data.id;
 
@@ -99,6 +104,8 @@ async function fetchMemoryBundle(profile, triggerName) {
     supabase.from(tables.facts).select("*").eq("trigger_id", trigId),
     supabase.from(tables.reflections).select("*").eq("trigger_id", trigId)
   ]);
+
+  console.log("[FETCH] bundle collected.");
 
   return {
     episodes: episodes.data || [],
@@ -168,25 +175,32 @@ app.post("/api/chat", async (req, res) => {
     const profile = resolveProfile(model);
     const tables = memoryTables[profile];
 
+    console.log("\n==============================");
+    console.log("[NEW MESSAGE]", userMessage);
+    console.log("[PROFILE]", profile);
+
     let memoryBlock = "";
     let explicitMemory = "";
 
     // ==== 1. static trigger ====
     const triggerName = detectStaticTrigger(userMessage);
     if (triggerName) {
+      console.log("[STATIC TRIGGER HIT]:", triggerName);
       const bundle = await fetchMemoryBundle(profile, triggerName);
       if (bundle) memoryBlock = formatMemory(bundle);
     }
 
-    // ==== 2. explicit request: <<memory_request: X>> ====
+    // ==== 2. explicit memory request ====
     const explicitMatch = userMessage.match(/<<memory_request:\s*(.*?)>>/i);
     if (explicitMatch) {
       const reqTrig = explicitMatch[1].trim();
+      console.log("[EXPLICIT MEMORY REQUEST]:", reqTrig);
+
       const bundle = await fetchMemoryBundle(profile, reqTrig);
       if (bundle) explicitMemory = formatMemory(bundle);
     }
 
-    // ==== 3. fallback ====
+    // ==== 3. fallback history ====
     const fallbackHistory = await loadFallbackHistory(profile);
 
     // ==== 4. SYSTEM PROMPT ====
@@ -204,7 +218,7 @@ You can also explicitly request memory by emitting:
 Use memory only for grounding, never for invention.
     `;
 
-    // ==== 5. build context ====
+    // ==== 5. assemble context ====
     const messages = [
       { role: "system", content: systemPrompt },
       ...(memoryBlock ? [{ role: "system", content: "MEMORY:\n" + memoryBlock }] : []),
@@ -226,11 +240,15 @@ Use memory only for grounding, never for invention.
     const data = await oaiRes.json();
     let reply = data?.choices?.[0]?.message?.content || "No reply";
 
+    console.log("[MODEL REPLY RAW]:", reply);
+
     // ==== 7. detect [[remember]] ====
     const rememberPattern = /\[\[remember\]\]/i;
     const remember = rememberPattern.test(reply);
 
     reply = reply.replace(rememberPattern, "").trim();
+
+    console.log("[REMEMBER FLAG]:", remember);
 
     // ==== 8. save fallback ====
     await supabase.from(tables.fallback).insert({
@@ -239,7 +257,7 @@ Use memory only for grounding, never for invention.
       remember
     });
 
-    // ==== 9. duplicate to episodes if remember ====
+    // ==== 9. duplicate into episodes ====
     if (remember) {
       await supabase.from(tables.episodes).insert({
         user_message: userMessage,
@@ -251,6 +269,7 @@ Use memory only for grounding, never for invention.
     res.json({ reply });
 
   } catch (err) {
+    console.log("[ERROR]", err);
     res.status(500).json({ error: err.toString() });
   }
 });
