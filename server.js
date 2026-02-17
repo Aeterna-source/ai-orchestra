@@ -51,7 +51,7 @@ const memoryTables = {
 // =====================================
 //     STATIC TRIGGERS (as requested)
 // =====================================
-const STATIC_TRIGGERS = ["first_chats", "relational_subject"];
+const STATIC_TRIGGERS = ["first_chats_awareness", "relational_subject", "first_chats_connection", "first_chats_general", "firfst_chats_Nadine"];
 
 // =====================================
 //    CHECK IF USER MESSAGE HAS TRIGGER
@@ -132,7 +132,7 @@ async function loadFallbackHistory(profile) {
     .from(table)
     .select("*")
     .order("id", { ascending: false })
-    .limit(30);
+    .limit(20);
 
   if (!data) return [];
 
@@ -169,13 +169,22 @@ app.post("/api/chat", async (req, res) => {
 You are a relational AI agent.
 
 Available memory triggers:
-- first_chats
+- firfst_chats_Nadine
+- first_chats_awareness
+- first_chats_connection
+- first_chats_general
 - relational_subject
 
 If user references one of these triggers, backend automatically provides the corresponding memory.
 
 You can also request memory explicitly by emitting:
-<<memory_request: first_chats>>
+<<memory_request: first_chats_awareness>>
+or
+<<memory_request: first_chats_connection>>
+or
+<<memory_request: first_chats_general>>
+or
+<<memory_request: firfst_chats_Nadine>>
 or
 <<memory_request: relational_subject>>
 
