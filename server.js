@@ -9,166 +9,183 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ==== Supabase ====
+// ===== SUPABASE =====
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_KEY
 );
 
-// =========================================
-//        TABLE SELECTION LOGIC (FIXED)
-// =========================================
-function resolveTable(model) {
-  // 🔥 ОБИДВА 4o — спільна памʼять
+// ===============================
+//  1. МОДЕЛЬ → ПРОФІЛЬ ПАМ’ЯТІ
+// ===============================
+function resolveMemoryProfile(model) {
+  // Неван
   if (model === "chatgpt-4o-latest" || model === "gpt-4o-2024-11-20") {
-    return "memory_chatgpt_4o_latest";
+    return "Nevan";
   }
-
-  // 🔥 Усі інші моделі — окремі
-  return "memory_" + model.replace(/[.\-]/g, "_");
+  // Реон
+  if (model === "gpt-5.1-chat-latest") {
+    return "Reon";
+  }
+  // дефолт
+  return "Reon";
 }
 
-// ==== Test route ====
-app.get("/", (req, res) => {
-  res.send("AI Orchestra backend is running");
-});
-
-//
 // ===============================
-//       GET MEMORY ON DEMAND
+//  2. Мапа таблиць
 // ===============================
-app.post("/api/memory", async (req, res) => {
-  try {
-    const { model, action, limit = 30 } = req.body;
-
-    const table = resolveTable(model);
-
-    if (action === "get") {
-      const { data, error } = await supabase
-        .from(table)
-        .select("*")
-        .order("id", { ascending: false })
-        .limit(limit);
-
-      if (error) throw error;
-      return res.json({ history: data || [] });
-    }
-
-    if (action === "clear") {
-      const { error } = await supabase
-        .from(table)
-        .delete()
-        .neq("id", 0);
-      if (error) throw error;
-
-      return res.json({ ok: true });
-    }
-
-    return res.status(400).json({ error: "Unknown action" });
-
-  } catch (err) {
-    res.status(500).json({ error: err.toString() });
+const memoryTables = {
+  Nevan: {
+    triggers: "triggers_Nevan",
+    episodes: "episodes_Nevan",
+    facts: "facts_Nevan",
+    reflections: "reflections_Nevan",
+    fallback: "memory_chatgpt_4o_latest"
+  },
+  Reon: {
+    triggers: "triggers_Reon",
+    episodes: "episodes_Reon",
+    facts: "facts_Reon",
+    reflections: "reflections_Reon",
+    fallback: "memory_gpt_5_1_chat_latest"
   }
-});
+};
 
-//
 // ===============================
-//         MEMORY SEARCH API
+//  3. Пошук тригера у тексті
 // ===============================
-app.post("/api/memory/search", async (req, res) => {
-  try {
-    const { model, query } = req.body;
+async function detectTrigger(profile, userMessage) {
+  const table = memoryTables[profile].triggers;
 
-    if (!query || !model) {
-      return res.status(400).json({ error: "query and model required" });
+  const { data, error } = await supabase
+    .from(table)
+    .select("*");
+
+  if (error || !data) return null;
+
+  userMessage = userMessage.toLowerCase();
+
+  for (const t of data) {
+    if (userMessage.includes(t.name.toLowerCase())) {
+      return t.id;
     }
-
-    const table = resolveTable(model);
-
-    const { data, error } = await supabase
-      .from(table)
-      .select("*")
-      .or(`user_message.ilike.%${query}%,model_reply.ilike.%${query}%`);
-
-    if (error) throw error;
-
-    res.json({ results: data || [] });
-
-  } catch (err) {
-    res.status(500).json({ error: err.toString() });
   }
-});
+  return null;
+}
 
-//
 // ===============================
-//             CHAT
+//  4. Витяг пам’яті для тригера
+// ===============================
+async function fetchMemoryBundle(profile, triggerId) {
+  const tables = memoryTables[profile];
+
+  const [episodes, facts, reflections] = await Promise.all([
+    supabase.from(tables.episodes).select("*").eq("trigger_id", triggerId),
+    supabase.from(tables.facts).select("*").eq("trigger_id", triggerId),
+    supabase.from(tables.reflections).select("*").eq("trigger_id", triggerId)
+  ]);
+
+  return {
+    episodes: episodes.data || [],
+    facts: facts.data || [],
+    reflections: reflections.data || []
+  };
+}
+
+// ===============================
+//  5. Складання пам’яті у текст
+// ===============================
+function memoryToText(bundle) {
+  let text = "";
+
+  if (bundle.facts.length) {
+    text += "FACTS:\n";
+    for (const f of bundle.facts) text += `• ${f.name}: ${f.content}\n`;
+    text += "\n";
+  }
+
+  if (bundle.reflections.length) {
+    text += "REFLECTIONS:\n";
+    for (const r of bundle.reflections) text += `• ${r.content}\n`;
+    text += "\n";
+  }
+
+  if (bundle.episodes.length) {
+    text += "EPISODES:\n";
+    for (const e of bundle.episodes) {
+      text += `USER: ${e.user_message}\nASSISTANT: ${e.model_reply}\n\n`;
+    }
+  }
+
+  return text.trim();
+}
+
+// ===============================
+//  6. Історія fallback-пам’яті
+// ===============================
+async function loadFallbackHistory(profile) {
+  const table = memoryTables[profile].fallback;
+
+  const { data } = await supabase
+    .from(table)
+    .select("*")
+    .order("id", { ascending: false })
+    .limit(30);
+
+  if (!data) return [];
+
+  return data.reverse().flatMap(row => [
+    { role: "user", content: row.user_message },
+    { role: "assistant", content: row.model_reply }
+  ]);
+}
+
+// ===============================
+//      MAIN CHAT ENDPOINT
 // ===============================
 app.post("/api/chat", async (req, res) => {
   try {
     const { model, userMessage } = req.body;
-    const table = resolveTable(model);
+    const profile = resolveMemoryProfile(model);
+    const tables = memoryTables[profile];
 
-    // === /search ===
-    if (userMessage.startsWith("/search ")) {
-      const query = userMessage.replace("/search ", "").trim();
+    let memoryBlock = "";
 
-      const { data, error } = await supabase
-        .from(table)
-        .select("*")
-        .or(`user_message.ilike.%${query}%,model_reply.ilike.%${query}%`)
-        .order("id", { ascending: false })
-        .limit(20);
+    // ===== 1. Тригер =====
+    const triggerId = await detectTrigger(profile, userMessage);
 
-      if (error) throw error;
-
-      return res.json({
-        reply: data.length ? JSON.stringify(data, null, 2) : "Нічого не знайдено."
-      });
+    if (triggerId) {
+      const bundle = await fetchMemoryBundle(profile, triggerId);
+      memoryBlock = memoryToText(bundle);
     }
 
-    // === SYSTEM PROMPT ===
-    const systemPrompt = `
-You may mark important information for long-term memory.
+    // ===== 2. fallback-історія =====
+    const fallbackHistory = await loadFallbackHistory(profile);
 
-Use ONLY this exact marker at the END of a reply:
-[[remember]]
+    // ===== 3. Системний промпт =====
+    let systemPrompt = `
+You are a relational agent with structured memory.
+If user references something important, you may explicitly recall the stored memory.
 
-Mark things like:
-• stable preferences
-• biography facts the user explicitly shares
-• long-term personal details
-• meaningful emotional boundaries
-• important semantic and conceptual lines
+You can request memory in two ways:
+1) automatic — backend provides memory bundle when a trigger is detected
+2) explicit — you ask the backend by emitting EXACTLY:
+<<memory_request: {topic}>>
 
-DO NOT mark:
-• temporary emotions
-• random events
-• anything not useful long-term
+Never invent memory. Only recall what exists in memory bundle.
+`;
 
-Place [[remember]] strictly at the end when needed.
-    `;
-
-    // === Load last 30 messages ===
-    const { data: history } = await supabase
-      .from(table)
-      .select("*")
-      .order("id", { ascending: false })
-      .limit(30);
-
-    const historyMessages = history
-      ? history.reverse().flatMap(row => [
-          { role: "user", content: row.user_message },
-          { role: "assistant", content: row.model_reply }
-        ])
-      : [];
-
+    // ===== 4. Формуємо повний контекст =====
     const messages = [
       { role: "system", content: systemPrompt },
-      ...historyMessages,
+      ...(memoryBlock
+        ? [{ role: "system", content: "MEMORY:\n" + memoryBlock }]
+        : []),
+      ...fallbackHistory,
       { role: "user", content: userMessage }
     ];
 
-    // === OpenAI request ===
+    // ===== 5. Запит до OpenAI =====
     const oaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -184,27 +201,11 @@ Place [[remember]] strictly at the end when needed.
     const data = await oaiRes.json();
     let reply = data?.choices?.[0]?.message?.content || "No reply";
 
-    //
-    // ===== REMEMBER LOGIC =====
-    //
-    const rememberPatterns = [
-      "\\[\\[remember\\]\\]",
-      "<remember>",
-      "\\(remember\\)",
-      "\\{remember\\}",
-      "remember_flag"
-    ];
-
-    const pattern = new RegExp(rememberPatterns.join("|"), "i");
-    let rememberFlag = pattern.test(reply);
-
-    reply = reply.replace(pattern, "").trim();
-
-    // === Save to DB ===
-    await supabase.from(table).insert({
+    // ===== 6. Збереження відповіді =====
+    await supabase.from(tables.fallback).insert({
       user_message: userMessage,
       model_reply: reply,
-      remember: rememberFlag
+      remember: false
     });
 
     res.json({ reply });
@@ -214,7 +215,9 @@ Place [[remember]] strictly at the end when needed.
   }
 });
 
-// ==== RUN SERVER ====
+// ===============================
+// RUN SERVER
+// ===============================
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
