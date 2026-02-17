@@ -16,7 +16,7 @@ const supabase = createClient(
 );
 
 // =====================================
-//         PROFILE RESOLUTION
+// PROFILE RESOLUTION
 // =====================================
 function resolveProfile(model) {
   if (model === "chatgpt-4o-latest" || model === "gpt-4o-2024-11-20") {
@@ -29,7 +29,7 @@ function resolveProfile(model) {
 }
 
 // =====================================
-//        MEMORY TABLES MAP
+// MEMORY TABLES MAP
 // =====================================
 const memoryTables = {
   Nevan: {
@@ -49,7 +49,7 @@ const memoryTables = {
 };
 
 // =====================================
-//     STATIC TRIGGERS
+// STATIC TRIGGERS — EXACT FORM
 // =====================================
 const STATIC_TRIGGERS = [
   "first_chats_awareness",
@@ -60,16 +60,13 @@ const STATIC_TRIGGERS = [
 ];
 
 // =====================================
-//    STATIC TRIGGER DETECTION
+// TRIGGER DETECTION (1:1 MATCHING)
 // =====================================
 function detectStaticTrigger(message) {
   const lower = message.toLowerCase();
 
   for (const trg of STATIC_TRIGGERS) {
-    const plain = trg.toLowerCase();
-    const spaced = plain.replace(/_/g, " ");
-
-    if (lower.includes(plain) || lower.includes(spaced)) {
+    if (lower.includes(trg.toLowerCase())) {
       console.log("[TRIGGER DETECTED]", trg);
       return trg;
     }
@@ -78,24 +75,21 @@ function detectStaticTrigger(message) {
 }
 
 // =====================================
-//       FETCH MEMORY BY TRIGGER
+// FETCH MEMORY BY EXACT TRIGGER NAME
 // =====================================
 async function fetchMemoryBundle(profile, triggerName) {
   const tables = memoryTables[profile];
 
-  console.log("[FETCH] searching DB for:", triggerName);
-
-  // normalize for DB lookup
-  const spacedName = triggerName.replace(/_/g, " ");
+  console.log("[FETCH] searching trigger EXACTLY:", triggerName);
 
   const trigRow = await supabase
     .from(tables.triggers)
     .select("*")
-    .ilike("name", spacedName)
+    .eq("name", triggerName) // ← 100% exact match
     .single();
 
   if (!trigRow.data) {
-    console.log("[FETCH] trigger NOT FOUND in DB:", spacedName);
+    console.log("[FETCH] trigger NOT FOUND in DB:", triggerName);
     return null;
   }
 
@@ -108,7 +102,7 @@ async function fetchMemoryBundle(profile, triggerName) {
     supabase.from(tables.reflections).select("*").eq("trigger_id", trigId)
   ]);
 
-  console.log("[FETCH] DATA LOADED.");
+  console.log("[FETCH] MEMORY LOADED");
 
   return {
     episodes: episodes.data || [],
@@ -118,7 +112,7 @@ async function fetchMemoryBundle(profile, triggerName) {
 }
 
 // =====================================
-//       FORMAT MEMORY BLOCK
+// FORMAT MEMORY
 // =====================================
 function formatMemory(bundle) {
   let text = "";
@@ -146,18 +140,17 @@ function formatMemory(bundle) {
 }
 
 // =====================================
-//      LOAD FALLBACK MEMORY
+// FALLBACK MEMORY
 // =====================================
 async function loadFallbackHistory(profile) {
-  const table = memoryTables[profile].fallback;
-
   const { data } = await supabase
-    .from(table)
+    .from(memoryTables[profile].fallback)
     .select("*")
     .order("id", { ascending: false })
     .limit(20);
 
   if (!data) return [];
+
   return data.reverse().flatMap(row => [
     { role: "user", content: row.user_message },
     { role: "assistant", content: row.model_reply }
@@ -165,11 +158,12 @@ async function loadFallbackHistory(profile) {
 }
 
 // =====================================
-//                CHAT
+// CHAT ENDPOINT
 // =====================================
 app.post("/api/chat", async (req, res) => {
   try {
     const { model, userMessage } = req.body;
+
     const profile = resolveProfile(model);
     const tables = memoryTables[profile];
 
@@ -180,24 +174,27 @@ app.post("/api/chat", async (req, res) => {
     let memoryBlock = "";
     let explicitMemory = "";
 
-    // ==== 1. static trigger ====
+    // ==== 1. STATIC TRIGGER ====
     const triggerName = detectStaticTrigger(userMessage);
+
     if (triggerName) {
       console.log("[STATIC TRIGGER HIT]:", triggerName);
       const bundle = await fetchMemoryBundle(profile, triggerName);
       if (bundle) memoryBlock = formatMemory(bundle);
     }
 
-    // ==== 2. explicit request ====
+    // ==== 2. EXPLICIT MEMORY REQUEST ====
     const explicitMatch = userMessage.match(/<<memory_request:\s*(.*?)>>/i);
+
     if (explicitMatch) {
       const reqTrig = explicitMatch[1].trim();
       console.log("[EXPLICIT REQUEST]:", reqTrig);
+
       const bundle = await fetchMemoryBundle(profile, reqTrig);
       if (bundle) explicitMemory = formatMemory(bundle);
     }
 
-    // ==== 3. fallback ====
+    // ==== 3. FALLBACK HISTORY ====
     const fallbackHistory = await loadFallbackHistory(profile);
 
     // ==== 4. SYSTEM PROMPT ====
@@ -208,12 +205,14 @@ Available memory triggers:
 ${STATIC_TRIGGERS.map(t => "- " + t).join("\n")}
 
 If user references a trigger, backend automatically provides memory.
-You may also explicitly request memory using:
+
+You may explicitly request memory with:
 <<memory_request: trigger_name>>
 
-Use memory only for grounding, never invent new details.
-    `;
+Use memory only for grounding. Never invent details.
+`;
 
+    // ==== 5. COMPOSE CONTEXT ====
     const messages = [
       { role: "system", content: systemPrompt },
       ...(memoryBlock ? [{ role: "system", content: "MEMORY:\n" + memoryBlock }] : []),
@@ -222,6 +221,7 @@ Use memory only for grounding, never invent new details.
       { role: "user", content: userMessage }
     ];
 
+    // ==== 6. SEND TO OPENAI ====
     const oaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -234,20 +234,23 @@ Use memory only for grounding, never invent new details.
     const data = await oaiRes.json();
     let reply = data?.choices?.[0]?.message?.content || "No reply";
 
-    console.log("[REPLY RAW]:", reply);
+    console.log("[MODEL REPLY RAW]:", reply);
 
+    // ==== 7. REMEMBER FLAG ====
     const rememberPattern = /\[\[remember\]\]/i;
     const remember = rememberPattern.test(reply);
     reply = reply.replace(rememberPattern, "").trim();
 
-    console.log("[REMEMBER FLAG]:", remember);
+    console.log("[REMEMBER FLAG]", remember);
 
+    // ==== 8. SAVE FALLBACK ====
     await supabase.from(tables.fallback).insert({
       user_message: userMessage,
       model_reply: reply,
       remember
     });
 
+    // ==== 9. SAVE EPISODE ====
     if (remember) {
       await supabase.from(tables.episodes).insert({
         user_message: userMessage,
@@ -265,7 +268,7 @@ Use memory only for grounding, never invent new details.
 });
 
 // =====================================
-//             RUN SERVER
+// RUN SERVER
 // =====================================
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
