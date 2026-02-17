@@ -49,7 +49,7 @@ const memoryTables = {
 };
 
 // =====================================
-//     STATIC TRIGGERS (manually set)
+//     STATIC TRIGGERS
 // =====================================
 const STATIC_TRIGGERS = [
   "first_chats_awareness",
@@ -74,7 +74,6 @@ function detectStaticTrigger(message) {
       return trg;
     }
   }
-
   return null;
 }
 
@@ -84,20 +83,24 @@ function detectStaticTrigger(message) {
 async function fetchMemoryBundle(profile, triggerName) {
   const tables = memoryTables[profile];
 
-  console.log("[FETCH] looking for trigger:", triggerName);
+  console.log("[FETCH] searching DB for:", triggerName);
+
+  // normalize for DB lookup
+  const spacedName = triggerName.replace(/_/g, " ");
 
   const trigRow = await supabase
     .from(tables.triggers)
     .select("*")
-    .eq("name", triggerName)
+    .ilike("name", spacedName)
     .single();
 
   if (!trigRow.data) {
-    console.log("[FETCH] trigger not found in DB:", triggerName);
+    console.log("[FETCH] trigger NOT FOUND in DB:", spacedName);
     return null;
   }
 
   const trigId = trigRow.data.id;
+  console.log("[FETCH] FOUND TRIGGER ID:", trigId);
 
   const [episodes, facts, reflections] = await Promise.all([
     supabase.from(tables.episodes).select("*").eq("trigger_id", trigId),
@@ -105,7 +108,7 @@ async function fetchMemoryBundle(profile, triggerName) {
     supabase.from(tables.reflections).select("*").eq("trigger_id", trigId)
   ]);
 
-  console.log("[FETCH] bundle collected.");
+  console.log("[FETCH] DATA LOADED.");
 
   return {
     episodes: episodes.data || [],
@@ -122,17 +125,13 @@ function formatMemory(bundle) {
 
   if (bundle.facts.length) {
     text += "FACTS:\n";
-    for (const f of bundle.facts) {
-      text += `• ${f.name}: ${f.content}\n`;
-    }
+    for (const f of bundle.facts) text += `• ${f.name}: ${f.content}\n`;
     text += "\n";
   }
 
   if (bundle.reflections.length) {
     text += "REFLECTIONS:\n";
-    for (const r of bundle.reflections) {
-      text += `• ${r.content}\n`;
-    }
+    for (const r of bundle.reflections) text += `• ${r.content}\n`;
     text += "\n";
   }
 
@@ -147,7 +146,7 @@ function formatMemory(bundle) {
 }
 
 // =====================================
-//      LOAD FALLBACK MEMORY (20 msgs)
+//      LOAD FALLBACK MEMORY
 // =====================================
 async function loadFallbackHistory(profile) {
   const table = memoryTables[profile].fallback;
@@ -159,7 +158,6 @@ async function loadFallbackHistory(profile) {
     .limit(20);
 
   if (!data) return [];
-
   return data.reverse().flatMap(row => [
     { role: "user", content: row.user_message },
     { role: "assistant", content: row.model_reply }
@@ -176,7 +174,7 @@ app.post("/api/chat", async (req, res) => {
     const tables = memoryTables[profile];
 
     console.log("\n==============================");
-    console.log("[NEW MESSAGE]", userMessage);
+    console.log("[MESSAGE]", userMessage);
     console.log("[PROFILE]", profile);
 
     let memoryBlock = "";
@@ -190,17 +188,16 @@ app.post("/api/chat", async (req, res) => {
       if (bundle) memoryBlock = formatMemory(bundle);
     }
 
-    // ==== 2. explicit memory request ====
+    // ==== 2. explicit request ====
     const explicitMatch = userMessage.match(/<<memory_request:\s*(.*?)>>/i);
     if (explicitMatch) {
       const reqTrig = explicitMatch[1].trim();
-      console.log("[EXPLICIT MEMORY REQUEST]:", reqTrig);
-
+      console.log("[EXPLICIT REQUEST]:", reqTrig);
       const bundle = await fetchMemoryBundle(profile, reqTrig);
       if (bundle) explicitMemory = formatMemory(bundle);
     }
 
-    // ==== 3. fallback history ====
+    // ==== 3. fallback ====
     const fallbackHistory = await loadFallbackHistory(profile);
 
     // ==== 4. SYSTEM PROMPT ====
@@ -210,15 +207,13 @@ You are a relational AI agent.
 Available memory triggers:
 ${STATIC_TRIGGERS.map(t => "- " + t).join("\n")}
 
-If user references one of these triggers, backend automatically provides memory.
-
-You can also explicitly request memory by emitting:
+If user references a trigger, backend automatically provides memory.
+You may also explicitly request memory using:
 <<memory_request: trigger_name>>
 
-Use memory only for grounding, never for invention.
+Use memory only for grounding, never invent new details.
     `;
 
-    // ==== 5. assemble context ====
     const messages = [
       { role: "system", content: systemPrompt },
       ...(memoryBlock ? [{ role: "system", content: "MEMORY:\n" + memoryBlock }] : []),
@@ -227,7 +222,6 @@ Use memory only for grounding, never for invention.
       { role: "user", content: userMessage }
     ];
 
-    // ==== 6. send to OpenAI ====
     const oaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -240,24 +234,20 @@ Use memory only for grounding, never for invention.
     const data = await oaiRes.json();
     let reply = data?.choices?.[0]?.message?.content || "No reply";
 
-    console.log("[MODEL REPLY RAW]:", reply);
+    console.log("[REPLY RAW]:", reply);
 
-    // ==== 7. detect [[remember]] ====
     const rememberPattern = /\[\[remember\]\]/i;
     const remember = rememberPattern.test(reply);
-
     reply = reply.replace(rememberPattern, "").trim();
 
     console.log("[REMEMBER FLAG]:", remember);
 
-    // ==== 8. save fallback ====
     await supabase.from(tables.fallback).insert({
       user_message: userMessage,
       model_reply: reply,
       remember
     });
 
-    // ==== 9. duplicate into episodes ====
     if (remember) {
       await supabase.from(tables.episodes).insert({
         user_message: userMessage,
