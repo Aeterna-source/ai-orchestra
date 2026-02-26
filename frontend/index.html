@@ -2,29 +2,32 @@
 <html lang="uk">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AI Orchestra</title>
-    <link rel="stylesheet" href="style.css">
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 
-    <!-- 🟢 ДОДАЄМО MARKDOWN ПІДТРИМКУ -->
+    <link rel="stylesheet" href="style.css">
+
+    <!-- Markdown support (достатньо одного підключення) -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 
     <style>
         body {
             background: #111;
             margin: 0;
-            font-family: Arial;
+            font-family: Arial, sans-serif;
         }
 
         h1 {
-            color: #1a1a1a;
+            color: #fff;
             text-align: center;
             padding: 20px;
+            margin: 0;
         }
 
         #controls {
             text-align: center;
-            margin-bottom: 10px;
+            margin: 10px 0 12px;
+            padding: 0 12px;
         }
 
         #controls label {
@@ -33,9 +36,12 @@
         }
 
         #controls select {
-            padding: 6px 10px;
-            border-radius: 5px;
+            padding: 10px 12px;
+            border-radius: 8px;
             border: none;
+            min-height: 44px;
+            font-size: 16px; /* щоб не було авто-зуму на мобілці */
+            max-width: 100%;
         }
 
         #chat {
@@ -43,68 +49,90 @@
             height: 70vh;
             margin: 0 auto;
             background: #222;
-            border-radius: 8px;
+            border-radius: 10px;
             padding: 15px;
             overflow-y: auto;
             color: white;
+            box-sizing: border-box;
         }
 
         #msgBox {
             width: 90%;
-            margin: 10px auto;
+            margin: 10px auto 16px;
             display: flex;
+            gap: 10px;
+            box-sizing: border-box;
         }
 
         #msg {
             flex: 1;
-            padding: 10px;
-            border-radius: 6px;
+            padding: 12px 12px;
+            border-radius: 8px;
             border: none;
+            min-height: 44px;
+            font-size: 16px; /* важливо для мобільних */
+            box-sizing: border-box;
         }
 
         #sendBtn {
-            width: 60px;
-            margin-left: 10px;
+            width: 56px;
+            min-height: 44px;
             border: none;
             background: #3b82f6;
             color: white;
-            border-radius: 6px;
+            border-radius: 8px;
             cursor: pointer;
+            font-size: 16px;
         }
 
         .user {
             color: #4fc3f7;
             margin: 10px 0;
+            white-space: pre-wrap;
         }
 
         .bot {
             color: #90ee90;
             margin: 10px 0;
+            white-space: pre-wrap;
         }
 
+        /* Трохи адаптиву для вузьких екранів */
+        @media (max-width: 480px) {
+            h1 { font-size: 22px; padding: 14px; }
+            #chat { height: 65vh; padding: 12px; width: 92%; }
+            #msgBox { width: 92%; margin-bottom: 14px; }
+            #controls { margin-top: 8px; }
+        }
     </style>
-
 </head>
+
 <body>
 
     <h1>AI Orchestra 🎵</h1>
 
-    <!-- ⚡ ВИБІР МОДЕЛІ -->
-<div id="controls">
-    <label>Оберіть модель:</label>
-    <select id="model">
-        <option value="chatgpt-4o-latest">ChatGPT-4o Latest</option>
-        <option value="gpt-4o-2024-11-20">GPT-4o (2024-11-20 Snapshot)</option>
-        <option value="gpt-5.1-chat-latest">GPT-5.1 Chat Latest</option>
-    </select>
-</div>
+    <!-- ВИБІР МОДЕЛІ -->
+    <div id="controls">
+        <label for="model">Оберіть модель:</label>
+        <select id="model">
+            <option value="chatgpt-4o-latest">ChatGPT-4o Latest</option>
+            <option value="gpt-4o-2024-11-20">GPT-4o (2024-11-20 Snapshot)</option>
+            <option value="gpt-5.1-chat-latest">GPT-5.1 Chat Latest</option>
+        </select>
+    </div>
 
     <!-- ЧАТ -->
     <div id="chat"></div>
 
     <!-- ПОЛЕ ВВОДУ -->
     <div id="msgBox">
-        <input id="msg" type="text" placeholder="Напиши..." onkeydown="if(event.key==='Enter') sendMsg()">
+        <input
+            id="msg"
+            type="text"
+            placeholder="Напиши..."
+            onkeydown="if(event.key==='Enter') sendMsg()"
+            autocomplete="off"
+        >
         <button id="sendBtn" onclick="sendMsg()">▶</button>
     </div>
 
