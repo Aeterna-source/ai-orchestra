@@ -49,6 +49,11 @@ const modelRegistry = {
     upstreamModel: "gpt-5.1-chat-latest",
     profile: "Reon"
   },
+  "gpt-5.1": {
+    provider: "openai",
+    upstreamModel: "gpt-5.1",
+    profile: "Reon"
+  },
   "local-relational": {
     provider: "local",
     upstreamModel: process.env.LOCAL_AI_MODEL || "local-model",
