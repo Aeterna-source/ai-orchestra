@@ -74,6 +74,10 @@ h1 {
 .bot li { margin-bottom: 6px; }
 .bot strong { font-weight: 700; }
 
+.bot.error {
+    color: #b42318 !important;
+}
+
 /* ====== INPUT AREA ====== */
 #msgBox {
     width: 90%;

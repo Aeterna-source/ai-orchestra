@@ -6,8 +6,6 @@
     <title>AI Orchestra</title>
 
     <link rel="stylesheet" href="style.css">
-
-    <!-- Markdown support (достатньо одного підключення) -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 
     <style>
@@ -40,7 +38,7 @@
             border-radius: 8px;
             border: none;
             min-height: 44px;
-            font-size: 16px; /* щоб не було авто-зуму на мобілці */
+            font-size: 16px;
             max-width: 100%;
         }
 
@@ -70,7 +68,7 @@
             border-radius: 8px;
             border: none;
             min-height: 44px;
-            font-size: 16px; /* важливо для мобільних */
+            font-size: 16px;
             box-sizing: border-box;
         }
 
@@ -97,7 +95,6 @@
             white-space: pre-wrap;
         }
 
-        /* Трохи адаптиву для вузьких екранів */
         @media (max-width: 480px) {
             h1 { font-size: 22px; padding: 14px; }
             #chat { height: 65vh; padding: 12px; width: 92%; }
@@ -108,23 +105,20 @@
 </head>
 
 <body>
+    <h1>AI Orchestra</h1>
 
-    <h1>AI Orchestra 🎵</h1>
-
-    <!-- ВИБІР МОДЕЛІ -->
     <div id="controls">
         <label for="model">Оберіть модель:</label>
         <select id="model">
             <option value="chatgpt-4o-latest">ChatGPT-4o Latest</option>
             <option value="gpt-4o-2024-11-20">GPT-4o (2024-11-20 Snapshot)</option>
             <option value="gpt-5.1-chat-latest">GPT-5.1 Chat Latest</option>
+            <option value="local-relational">Local relational model</option>
         </select>
     </div>
 
-    <!-- ЧАТ -->
     <div id="chat"></div>
 
-    <!-- ПОЛЕ ВВОДУ -->
     <div id="msgBox">
         <input
             id="msg"
@@ -137,6 +131,5 @@
     </div>
 
     <script src="script.js"></script>
-
 </body>
 </html>
