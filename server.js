@@ -554,15 +554,15 @@ app.post("/api/chat", async (req, res) => {
     let messages = [
       { role: "system", content: buildSystemPrompt() },
       { role: "system", content: buildMemoryProtocolPrompt(triggerCatalog) },
+      ...fallbackHistory,
       ...(memoryBlock ? [{ role: "system", content: "MEMORY:\n" + memoryBlock }] : []),
       ...(memoryBlock
         ? [{
             role: "system",
             content:
-              "The MEMORY block above is available for this reply. Treat it as context, not as a user-visible diagnostic. If the user asks whether memory arrived, answer from the MEMORY_STATUS values."
+              "The MEMORY block above is active for this exact reply and should take priority over fallback chat history. Treat it as context, not as a user-visible diagnostic. If the user asks whether memory arrived, answer from the MEMORY_STATUS values. Do not say the memory may have failed if MEMORY_STATUS says facts, reflections, or episodes were loaded."
           }]
         : []),
-      ...fallbackHistory,
       { role: "user", content: userMessage }
     ];
 
