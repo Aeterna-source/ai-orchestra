@@ -32,6 +32,44 @@ async function postChat(payload) {
   throw lastError || new Error("Backend request failed");
 }
 
+function escapeHtml(value = "") {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function formatMemoryStatus(debug) {
+  if (!debug) return "";
+
+  const counts = debug.memoryCounts || {};
+  const trigger = debug.activeTriggerName || debug.exactTriggerName || debug.classifierTriggerName;
+  const source = debug.triggerCatalogMeta?.source || "unknown";
+  const loaded = debug.memoryLoaded || debug.requestedMemoryLoaded;
+  const state = loaded ? "memory loaded" : "memory not loaded";
+  const details = [
+    trigger ? `trigger: ${trigger}` : "trigger: none",
+    `source: ${source}`,
+    `facts: ${counts.facts ?? 0}`,
+    `reflections: ${counts.reflections ?? 0}`,
+    `episodes: ${counts.episodes ?? 0}`,
+    `fallback: ${debug.fallbackCount ?? 0}`
+  ];
+
+  if (debug.remember) {
+    details.push(debug.episodeSaved ? "saved episode" : "remember requested");
+  }
+
+  return `
+    <div class="memory-status ${loaded ? "loaded" : "empty"}">
+      <span>${state}</span>
+      <small>${details.map(escapeHtml).join(" · ")}</small>
+    </div>
+  `;
+}
+
 async function sendMsg() {
   const box = document.getElementById("msg");
   const chat = document.getElementById("chat");
@@ -40,16 +78,16 @@ async function sendMsg() {
   const text = box.value.trim();
   if (!text) return;
 
-  chat.innerHTML += `<div class="user">${text}</div>`;
+  chat.innerHTML += `<div class="user">${escapeHtml(text)}</div>`;
   chat.scrollTop = chat.scrollHeight;
   box.value = "";
 
   try {
-    const data = await postChat({ model, userMessage: text });
+    const data = await postChat({ model, userMessage: text, debug: true });
     const formatted = marked.parse(data.reply || "");
-    chat.innerHTML += `<div class="bot">${formatted}</div>`;
+    chat.innerHTML += `<div class="bot">${formatted}${formatMemoryStatus(data.debug)}</div>`;
   } catch (err) {
-    chat.innerHTML += `<div class="bot error">${err.message}</div>`;
+    chat.innerHTML += `<div class="bot error">${escapeHtml(err.message)}</div>`;
   }
 
   chat.scrollTop = chat.scrollHeight;

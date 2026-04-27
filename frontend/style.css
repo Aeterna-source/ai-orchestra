@@ -78,6 +78,43 @@ h1 {
     color: #b42318 !important;
 }
 
+.memory-status {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    max-width: 100%;
+    margin-top: 10px;
+    padding: 6px 9px;
+    border: 1px solid #d7dee8;
+    border-radius: 8px;
+    background: #f8fafc;
+    color: #475467;
+    font-size: 12px;
+    line-height: 1.35;
+    white-space: normal;
+}
+
+.memory-status span {
+    font-weight: 700;
+}
+
+.memory-status small {
+    font-size: 12px;
+}
+
+.memory-status.loaded {
+    border-color: #b7e4cf;
+    background: #f1fbf6;
+    color: #10603d;
+}
+
+.memory-status.empty {
+    border-color: #ffd7a8;
+    background: #fff8ed;
+    color: #8a4b0f;
+}
+
 /* ====== INPUT AREA ====== */
 #msgBox {
     width: 90%;
