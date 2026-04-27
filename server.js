@@ -87,6 +87,9 @@ const STATIC_TRIGGERS = [
 ];
 
 const ALLOWED_TRIGGERS = new Set(STATIC_TRIGGERS);
+const TRIGGER_LOOKUP = new Map(
+  STATIC_TRIGGERS.map((triggerName) => [triggerName.toLowerCase(), triggerName])
+);
 const MEMORY_REQUEST_PATTERN = /<<memory_request:\s*([\w-]+)\s*>>/gi;
 const REMEMBER_PATTERN = /\[\[remember(?::\s*([\w-]+))?\]\]/gi;
 
@@ -111,10 +114,14 @@ function detectStaticTrigger(message) {
   return null;
 }
 
+function normalizeTriggerName(triggerName = "") {
+  return TRIGGER_LOOKUP.get(triggerName.trim().toLowerCase()) || null;
+}
+
 function extractMemoryRequest(text = "") {
   MEMORY_REQUEST_PATTERN.lastIndex = 0;
   const match = MEMORY_REQUEST_PATTERN.exec(text);
-  return match?.[1]?.trim() || null;
+  return normalizeTriggerName(match?.[1] || "");
 }
 
 function extractRememberDirective(text = "") {
@@ -122,7 +129,7 @@ function extractRememberDirective(text = "") {
   const match = REMEMBER_PATTERN.exec(text);
   return {
     remember: Boolean(match),
-    triggerName: match?.[1]?.trim() || null
+    triggerName: normalizeTriggerName(match?.[1] || "")
   };
 }
 
@@ -173,7 +180,8 @@ async function callChatCompletion({ providerName, model, messages }) {
 }
 
 async function fetchMemoryBundle(profile, triggerName) {
-  if (!ALLOWED_TRIGGERS.has(triggerName)) {
+  const normalizedTriggerName = normalizeTriggerName(triggerName);
+  if (!normalizedTriggerName || !ALLOWED_TRIGGERS.has(normalizedTriggerName)) {
     console.log("[TRIGGER NOT ALLOWED]", { profile, triggerName });
     return null;
   }
@@ -183,13 +191,13 @@ async function fetchMemoryBundle(profile, triggerName) {
   const { data: triggerData, error: triggerError } = await supabase
     .from(tables.triggers)
     .select("*")
-    .eq("name", triggerName)
+    .ilike("name", normalizedTriggerName)
     .maybeSingle();
 
   if (triggerError || !triggerData) {
     console.log("[TRIGGER NOT FOUND]", {
       profile,
-      triggerName,
+      triggerName: normalizedTriggerName,
       error: formatSupabaseError(triggerError)
     });
     return null;
@@ -229,7 +237,7 @@ async function fetchMemoryBundle(profile, triggerName) {
 
   return {
     triggerId,
-    triggerName,
+    triggerName: normalizedTriggerName,
     episodes: (episodesRes.data || []).reverse(),
     facts: factsRes.data || [],
     reflections: reflectionsRes.data || []
@@ -353,13 +361,14 @@ Internal memory protocol:
 Available memory triggers:
 ${STATIC_TRIGGERS.map((triggerName) => `- ${triggerName}`).join("\n")}
 
-If a relevant episodic memory trigger is needed and no matching MEMORY block is already present, include exactly one internal tag:
-<<memory_request:trigger_name>>
+If a relevant episodic memory trigger is needed and no matching MEMORY block is already present, include exactly one internal tag using one of the trigger names above.
+Example: <<memory_request:relational_subject>>
 
-If the current exchange should be stored as an episode, include one internal tag:
-[[remember:trigger_name]]
+If the current exchange should be stored as an episode, include one internal tag using one of the trigger names above.
+Example: [[remember:relational_subject]]
 
 Use [[remember]] only when a MEMORY or REQUESTED_MEMORY block is already active for the right trigger.
+Never output the literal placeholder "trigger_name".
 These tags are private control signals. Do not explain them, quote them, or make them part of the user-facing answer.
 `.trim();
 }
