@@ -34,11 +34,6 @@ const providers = {
 };
 
 const modelRegistry = {
-  "chatgpt-4o-latest": {
-    provider: "openai",
-    upstreamModel: "gpt-4o-2024-11-20",
-    profile: "Nevan"
-  },
   "gpt-4o-2024-11-20": {
     provider: "openai",
     upstreamModel: "gpt-4o-2024-11-20",
