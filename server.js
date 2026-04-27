@@ -9,7 +9,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-if (!process.env.SUPABASE_URL || !process.env.SUPABASE_KEY) {
+if (!process.env.SUPABASE_URL || (!process.env.SUPABASE_KEY && !process.env.SUPABASE_SERVICE_ROLE_KEY)) {
   throw new Error("Missing Supabase credentials");
 }
 
@@ -19,7 +19,7 @@ if (!process.env.OPENAI_API_KEY) {
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_KEY
+  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY
 );
 
 const providers = {
@@ -101,12 +101,14 @@ function resolveModelConfig(model) {
 }
 
 function fallbackTriggerCatalog() {
-  return STATIC_TRIGGERS.map((name, index) => ({
+  const catalog = STATIC_TRIGGERS.map((name, index) => ({
     id: null,
     name,
     description: "",
     fallbackOrder: index
   }));
+  catalog.meta = { source: "fallback" };
+  return catalog;
 }
 
 function buildTriggerLookup(triggerCatalog = fallbackTriggerCatalog()) {
@@ -202,14 +204,26 @@ async function fetchTriggerCatalog(profile) {
       profile,
       error: formatSupabaseError(error)
     });
-    return fallbackTriggerCatalog();
+    const fallback = fallbackTriggerCatalog();
+    fallback.meta = {
+      source: "fallback",
+      reason: "catalog_load_error",
+      error: formatSupabaseError(error)
+    };
+    return fallback;
   }
 
   if (!data?.length) {
     console.log("[TRIGGER CATALOG EMPTY]", { profile });
-    return fallbackTriggerCatalog();
+    const fallback = fallbackTriggerCatalog();
+    fallback.meta = {
+      source: "fallback",
+      reason: "catalog_empty"
+    };
+    return fallback;
   }
 
+  data.meta = { source: "supabase" };
   return data;
 }
 
@@ -475,6 +489,7 @@ app.post("/api/chat", async (req, res) => {
       model,
       profile: modelConfig.profile,
       provider: modelConfig.provider,
+      triggerCatalogMeta: triggerCatalog.meta || { source: "unknown" },
       triggerCatalog: triggerCatalog.map((trigger) => ({
         id: trigger.id,
         name: trigger.name,
