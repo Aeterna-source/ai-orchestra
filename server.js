@@ -86,10 +86,6 @@ const STATIC_TRIGGERS = [
   "relational_subject"
 ];
 
-const ALLOWED_TRIGGERS = new Set(STATIC_TRIGGERS);
-const TRIGGER_LOOKUP = new Map(
-  STATIC_TRIGGERS.map((triggerName) => [triggerName.toLowerCase(), triggerName])
-);
 const MEMORY_REQUEST_PATTERN = /<<memory_request:\s*([\w-]+)\s*>>/gi;
 const REMEMBER_PATTERN = /\[\[remember(?::\s*([\w-]+))?\]\]/gi;
 
@@ -104,32 +100,47 @@ function resolveModelConfig(model) {
   return config;
 }
 
-function detectStaticTrigger(message) {
+function fallbackTriggerCatalog() {
+  return STATIC_TRIGGERS.map((name, index) => ({
+    id: null,
+    name,
+    description: "",
+    fallbackOrder: index
+  }));
+}
+
+function buildTriggerLookup(triggerCatalog = fallbackTriggerCatalog()) {
+  return new Map(
+    triggerCatalog.map((trigger) => [trigger.name.toLowerCase(), trigger.name])
+  );
+}
+
+function normalizeTriggerName(triggerName = "", triggerCatalog) {
+  return buildTriggerLookup(triggerCatalog).get(triggerName.trim().toLowerCase()) || null;
+}
+
+function detectStaticTrigger(message, triggerCatalog) {
   const lower = message.toLowerCase();
-  for (const triggerName of STATIC_TRIGGERS) {
-    if (lower.includes(triggerName.toLowerCase())) {
-      return triggerName;
+  for (const trigger of triggerCatalog) {
+    if (lower.includes(trigger.name.toLowerCase())) {
+      return trigger.name;
     }
   }
   return null;
 }
 
-function normalizeTriggerName(triggerName = "") {
-  return TRIGGER_LOOKUP.get(triggerName.trim().toLowerCase()) || null;
-}
-
-function extractMemoryRequest(text = "") {
+function extractMemoryRequest(text = "", triggerCatalog) {
   MEMORY_REQUEST_PATTERN.lastIndex = 0;
   const match = MEMORY_REQUEST_PATTERN.exec(text);
-  return normalizeTriggerName(match?.[1] || "");
+  return normalizeTriggerName(match?.[1] || "", triggerCatalog);
 }
 
-function extractRememberDirective(text = "") {
+function extractRememberDirective(text = "", triggerCatalog) {
   REMEMBER_PATTERN.lastIndex = 0;
   const match = REMEMBER_PATTERN.exec(text);
   return {
     remember: Boolean(match),
-    triggerName: normalizeTriggerName(match?.[1] || "")
+    triggerName: normalizeTriggerName(match?.[1] || "", triggerCatalog)
   };
 }
 
@@ -150,7 +161,7 @@ function formatSupabaseError(error) {
   };
 }
 
-async function callChatCompletion({ providerName, model, messages }) {
+async function callChatCompletion({ providerName, model, messages, extraBody = {} }) {
   const provider = providers[providerName];
   if (!provider) {
     throw new Error(`Unknown provider: ${providerName}`);
@@ -162,7 +173,7 @@ async function callChatCompletion({ providerName, model, messages }) {
       "Content-Type": "application/json",
       Authorization: `Bearer ${provider.apiKey}`
     },
-    body: JSON.stringify({ model, messages })
+    body: JSON.stringify({ model, messages, ...extraBody })
   });
 
   const data = await response.json().catch(() => ({}));
@@ -179,9 +190,65 @@ async function callChatCompletion({ providerName, model, messages }) {
   return data?.choices?.[0]?.message?.content || "";
 }
 
-async function fetchMemoryBundle(profile, triggerName) {
-  const normalizedTriggerName = normalizeTriggerName(triggerName);
-  if (!normalizedTriggerName || !ALLOWED_TRIGGERS.has(normalizedTriggerName)) {
+async function fetchTriggerCatalog(profile) {
+  const tables = memoryTables[profile];
+  const { data, error } = await supabase
+    .from(tables.triggers)
+    .select("id,name,description")
+    .order("id", { ascending: true });
+
+  if (error) {
+    console.log("[TRIGGER CATALOG LOAD ERROR]", {
+      profile,
+      error: formatSupabaseError(error)
+    });
+    return fallbackTriggerCatalog();
+  }
+
+  if (!data?.length) {
+    console.log("[TRIGGER CATALOG EMPTY]", { profile });
+    return fallbackTriggerCatalog();
+  }
+
+  return data;
+}
+
+async function resolveTriggerWithModel({ modelConfig, userMessage, triggerCatalog }) {
+  if (!triggerCatalog.length || process.env.AUTO_TRIGGER_CLASSIFIER === "false") {
+    return null;
+  }
+
+  const catalogText = triggerCatalog
+    .map((trigger) => `- ${trigger.name}: ${trigger.description || "(no description)"}`)
+    .join("\n");
+
+  try {
+    const raw = await callChatCompletion({
+      providerName: modelConfig.provider,
+      model: modelConfig.upstreamModel,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You route episodic memory. Choose at most one trigger from the catalog for the user's message. Return JSON only, with this shape: {\"trigger\":\"trigger_name\"} or {\"trigger\":null}. Choose null if none is clearly relevant.\n\nTrigger catalog:\n" +
+            catalogText
+        },
+        { role: "user", content: userMessage }
+      ]
+    });
+
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    const parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : { trigger: raw.trim() };
+    return normalizeTriggerName(parsed.trigger || "", triggerCatalog);
+  } catch (err) {
+    console.log("[TRIGGER CLASSIFIER ERROR]", err.message);
+    return null;
+  }
+}
+
+async function fetchMemoryBundle(profile, triggerName, triggerCatalog) {
+  const normalizedTriggerName = normalizeTriggerName(triggerName, triggerCatalog);
+  if (!normalizedTriggerName) {
     console.log("[TRIGGER NOT ALLOWED]", { profile, triggerName });
     return null;
   }
@@ -354,12 +421,19 @@ The user explores philosophical questions, but does not require repeated ontolog
 `.trim();
 }
 
-function buildMemoryProtocolPrompt() {
+function buildMemoryProtocolPrompt(triggerCatalog) {
+  const triggerList = triggerCatalog
+    .map(
+      (trigger) =>
+        `- ${trigger.name}${trigger.description ? `: ${trigger.description}` : ""}`
+    )
+    .join("\n");
+
   return `
 Internal memory protocol:
 
 Available memory triggers:
-${STATIC_TRIGGERS.map((triggerName) => `- ${triggerName}`).join("\n")}
+${triggerList}
 
 If a relevant episodic memory trigger is needed and no matching MEMORY block is already present, include exactly one internal tag using one of the trigger names above.
 Example: <<memory_request:relational_subject>>
@@ -388,7 +462,7 @@ app.get("/api/health", (_req, res) => {
 
 app.post("/api/chat", async (req, res) => {
   try {
-    const { model, userMessage } = req.body;
+    const { model, userMessage, debug = false } = req.body;
 
     if (!model || !userMessage) {
       return res.status(400).json({ error: "Missing model or userMessage" });
@@ -396,26 +470,72 @@ app.post("/api/chat", async (req, res) => {
 
     const modelConfig = resolveModelConfig(model);
     const tables = memoryTables[modelConfig.profile];
+    const triggerCatalog = await fetchTriggerCatalog(modelConfig.profile);
+    const debugInfo = {
+      model,
+      profile: modelConfig.profile,
+      provider: modelConfig.provider,
+      triggerCatalog: triggerCatalog.map((trigger) => ({
+        id: trigger.id,
+        name: trigger.name,
+        hasDescription: Boolean(trigger.description)
+      })),
+      exactTriggerName: null,
+      classifierTriggerName: null,
+      activeTriggerName: null,
+      activeTriggerId: null,
+      memoryLoaded: false,
+      memoryCounts: null,
+      fallbackCount: 0,
+      requestedTriggerName: null,
+      requestedMemoryLoaded: false,
+      remember: false,
+      episodeSaved: false
+    };
 
     let memoryBlock = "";
     let activeTriggerId = null;
     let activeTriggerName = null;
 
-    const triggerName = detectStaticTrigger(userMessage);
+    let triggerName = detectStaticTrigger(userMessage, triggerCatalog);
+    debugInfo.exactTriggerName = triggerName;
+
+    if (!triggerName) {
+      triggerName = await resolveTriggerWithModel({
+        modelConfig,
+        userMessage,
+        triggerCatalog
+      });
+      debugInfo.classifierTriggerName = triggerName;
+    }
+
     if (triggerName) {
-      const bundle = await fetchMemoryBundle(modelConfig.profile, triggerName);
+      const bundle = await fetchMemoryBundle(
+        modelConfig.profile,
+        triggerName,
+        triggerCatalog
+      );
       if (bundle) {
         memoryBlock = formatMemory(bundle);
         activeTriggerId = bundle.triggerId;
         activeTriggerName = bundle.triggerName;
+        debugInfo.activeTriggerName = activeTriggerName;
+        debugInfo.activeTriggerId = activeTriggerId;
+        debugInfo.memoryLoaded = true;
+        debugInfo.memoryCounts = {
+          facts: bundle.facts.length,
+          reflections: bundle.reflections.length,
+          episodes: bundle.episodes.length
+        };
       }
     }
 
     const fallbackHistory = await loadFallbackHistory(modelConfig.profile);
+    debugInfo.fallbackCount = fallbackHistory.length / 2;
 
     let messages = [
       { role: "system", content: buildSystemPrompt() },
-      { role: "system", content: buildMemoryProtocolPrompt() },
+      { role: "system", content: buildMemoryProtocolPrompt(triggerCatalog) },
       ...(memoryBlock ? [{ role: "system", content: "MEMORY:\n" + memoryBlock }] : []),
       ...fallbackHistory,
       { role: "user", content: userMessage }
@@ -429,15 +549,29 @@ app.post("/api/chat", async (req, res) => {
 
     console.log("[MODEL RAW OUTPUT]", reply);
 
-    const requestedTrigger = extractMemoryRequest(reply);
+    const requestedTrigger = extractMemoryRequest(reply, triggerCatalog);
+    debugInfo.requestedTriggerName = requestedTrigger;
+
     if (requestedTrigger) {
-      const bundle = await fetchMemoryBundle(modelConfig.profile, requestedTrigger);
+      const bundle = await fetchMemoryBundle(
+        modelConfig.profile,
+        requestedTrigger,
+        triggerCatalog
+      );
 
       if (bundle) {
         const requestedMemory = formatMemory(bundle);
         const cleanDraft = cleanProtocolTags(reply);
         activeTriggerId = bundle.triggerId;
         activeTriggerName = bundle.triggerName;
+        debugInfo.activeTriggerName = activeTriggerName;
+        debugInfo.activeTriggerId = activeTriggerId;
+        debugInfo.requestedMemoryLoaded = true;
+        debugInfo.memoryCounts = {
+          facts: bundle.facts.length,
+          reflections: bundle.reflections.length,
+          episodes: bundle.episodes.length
+        };
 
         messages = [
           ...messages,
@@ -459,19 +593,24 @@ app.post("/api/chat", async (req, res) => {
       }
     }
 
-    const rememberDirective = extractRememberDirective(reply);
+    const rememberDirective = extractRememberDirective(reply, triggerCatalog);
     let remember = rememberDirective.remember;
+    debugInfo.remember = remember;
 
     if (rememberDirective.triggerName) {
       const bundle = await fetchMemoryBundle(
         modelConfig.profile,
-        rememberDirective.triggerName
+        rememberDirective.triggerName,
+        triggerCatalog
       );
       if (bundle) {
         activeTriggerId = bundle.triggerId;
         activeTriggerName = bundle.triggerName;
+        debugInfo.activeTriggerName = activeTriggerName;
+        debugInfo.activeTriggerId = activeTriggerId;
       } else {
         remember = false;
+        debugInfo.remember = false;
       }
     }
 
@@ -481,6 +620,7 @@ app.post("/api/chat", async (req, res) => {
 
     if (remember && activeTriggerId) {
       await insertEpisode(tables, userMessage, reply, activeTriggerId);
+      debugInfo.episodeSaved = true;
       console.log("[EPISODE SAVED]", {
         profile: modelConfig.profile,
         triggerName: activeTriggerName,
@@ -493,7 +633,7 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    res.json({ reply });
+    res.json(debug ? { reply, debug: debugInfo } : { reply });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
