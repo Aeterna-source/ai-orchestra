@@ -321,7 +321,15 @@ async function fetchMemoryBundle(profile, triggerName, triggerCatalog) {
 }
 
 function formatMemory(bundle) {
-  const sections = [];
+  const sections = [
+    [
+      "MEMORY_STATUS:",
+      `trigger: ${bundle.triggerName}`,
+      `facts: ${bundle.facts.length}`,
+      `reflections: ${bundle.reflections.length}`,
+      `episodes: ${bundle.episodes.length}`
+    ].join("\n")
+  ];
 
   if (bundle.facts.length) {
     sections.push(
@@ -547,6 +555,13 @@ app.post("/api/chat", async (req, res) => {
       { role: "system", content: buildSystemPrompt() },
       { role: "system", content: buildMemoryProtocolPrompt(triggerCatalog) },
       ...(memoryBlock ? [{ role: "system", content: "MEMORY:\n" + memoryBlock }] : []),
+      ...(memoryBlock
+        ? [{
+            role: "system",
+            content:
+              "The MEMORY block above is available for this reply. Treat it as context, not as a user-visible diagnostic. If the user asks whether memory arrived, answer from the MEMORY_STATUS values."
+          }]
+        : []),
       ...fallbackHistory,
       { role: "user", content: userMessage }
     ];
