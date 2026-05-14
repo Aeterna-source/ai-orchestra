@@ -7,7 +7,7 @@ dotenv.config();
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 
 if (!process.env.SUPABASE_URL || (!process.env.SUPABASE_KEY && !process.env.SUPABASE_SERVICE_ROLE_KEY)) {
   throw new Error("Missing Supabase credentials");
@@ -475,6 +475,45 @@ app.get("/api/health", (_req, res) => {
       ])
     )
   });
+});
+
+const TEMP_IMPORT_TOKEN = "jmN4-PWuhOwjQeVtKs6FL0SeF4ajYl2pdoEM4dku7m8";
+
+app.post("/api/import/episodes-nevan", async (req, res) => {
+  try {
+    if (req.headers["x-import-token"] !== TEMP_IMPORT_TOKEN) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+    if (!rows.length || rows.length > 200) {
+      return res.status(400).json({ error: "Expected 1-200 rows" });
+    }
+
+    const cleaned = rows
+      .map((row) => ({
+        trigger_id: null,
+        user_message: String(row.user_message || "").trim(),
+        model_reply: String(row.model_reply || "").trim(),
+        date: row.date || null
+      }))
+      .filter((row) => row.user_message && row.model_reply);
+
+    if (!cleaned.length) {
+      return res.status(400).json({ error: "No valid rows" });
+    }
+
+    const { error } = await supabase.from("episodes_Nevan").insert(cleaned);
+    if (error) {
+      console.error("[IMPORT EPISODES ERROR]", formatSupabaseError(error));
+      return res.status(500).json({ error: "Import insert failed" });
+    }
+
+    res.json({ ok: true, inserted: cleaned.length });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post("/api/chat", async (req, res) => {
