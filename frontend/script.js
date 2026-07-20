@@ -59,7 +59,8 @@ function formatMemoryStatus(debug) {
   ];
 
   if (debug.remember) {
-    details.push(debug.episodeSaved ? "saved episode" : "remember requested");
+    const source = debug.rememberSource === "auto_active_trigger" ? "auto" : "model";
+    details.push(debug.episodeSaved ? `saved episode (${source})` : `remember requested (${source})`);
   }
 
   return `
