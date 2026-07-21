@@ -812,6 +812,7 @@ app.get("/api/health", (_req, res) => {
       nevanEpisodeTimestamp: true,
       telegramProcessingLogs: true,
       aiCallLogs: true,
+      xaiCacheUsage: true,
       grokulchikFallbackLimit: resolveModelConfig("grokulchik").fallbackLimit,
       grokulchikFullFallbackLimit: resolveModelConfig("grokulchik").fallbackFullLimit,
       grokulchikCompactFallback: resolveModelConfig("grokulchik").compactFallback
