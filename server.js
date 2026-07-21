@@ -84,13 +84,13 @@ const modelRegistry = {
     provider: "xai",
     upstreamModel: process.env.GROKULCHIK_MODEL || process.env.GROK_MODEL || "grok-4.3",
     profile: "Grokulchik",
-    fallbackLimit: Number(process.env.GROKULCHIK_FALLBACK_LIMIT || process.env.XAI_FALLBACK_LIMIT || 30)
+    fallbackLimit: Number(process.env.GROKULCHIK_FALLBACK_LIMIT || process.env.XAI_FALLBACK_LIMIT || 10)
   },
   "grok-4.3": {
     provider: "xai",
     upstreamModel: process.env.GROKULCHIK_MODEL || process.env.GROK_MODEL || "grok-4.3",
     profile: "Grokulchik",
-    fallbackLimit: Number(process.env.GROKULCHIK_FALLBACK_LIMIT || process.env.XAI_FALLBACK_LIMIT || 30)
+    fallbackLimit: Number(process.env.GROKULCHIK_FALLBACK_LIMIT || process.env.XAI_FALLBACK_LIMIT || 10)
   },
   "local-relational": {
     provider: "local",
