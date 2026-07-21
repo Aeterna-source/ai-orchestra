@@ -597,6 +597,10 @@ These tags are private control signals. Do not explain them, quote them, or make
 app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
+    build: {
+      telegramDeliveryLogs: true,
+      xaiTriggerClassifierDefault: false
+    },
     models: Object.keys(modelRegistry),
     providers: Object.fromEntries(
       Object.entries(providers).map(([name, provider]) => [
