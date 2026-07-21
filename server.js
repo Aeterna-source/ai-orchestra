@@ -183,6 +183,7 @@ const TELEGRAM_GROUP_TABLE = process.env.TELEGRAM_GROUP_TABLE || "telegram_group
 const TELEGRAM_GROUP_FALLBACK_LIMIT = Number(process.env.TELEGRAM_GROUP_FALLBACK_LIMIT || 80);
 const TELEGRAM_REACTIONS_ENABLED = process.env.TELEGRAM_REACTIONS_ENABLED !== "false";
 const TELEGRAM_REACTION_COOLDOWN_MS = Number(process.env.TELEGRAM_REACTION_COOLDOWN_MS || 45000);
+const TELEGRAM_MESSAGE_CHUNK_SIZE = Number(process.env.TELEGRAM_MESSAGE_CHUNK_SIZE || 3200);
 const telegramReactionLastUsed = new Map();
 
 const STATIC_TRIGGERS = [
@@ -373,6 +374,14 @@ async function resolveTriggerWithModel({ modelConfig, userMessage, triggerCatalo
     console.log("[TRIGGER CLASSIFIER ERROR]", err.message);
     return null;
   }
+}
+
+function shouldUseTriggerClassifier(modelConfig) {
+  if (process.env.AUTO_TRIGGER_CLASSIFIER === "false") return false;
+  if (modelConfig.provider === "xai") {
+    return process.env.XAI_TRIGGER_CLASSIFIER === "true";
+  }
+  return true;
 }
 
 async function fetchMemoryBundle(profile, triggerName, triggerCatalog) {
@@ -653,7 +662,7 @@ async function generateChatReply({
   let triggerName = detectStaticTrigger(userMessage, triggerCatalog);
   debugInfo.exactTriggerName = triggerName;
 
-  if (!triggerName) {
+  if (!triggerName && shouldUseTriggerClassifier(modelConfig)) {
     triggerName = await resolveTriggerWithModel({
       modelConfig,
       userMessage,
@@ -954,7 +963,7 @@ function addressedToBot(message, botConfig) {
   return false;
 }
 
-async function telegramApi(botConfig, method, body) {
+async function telegramApiResult(botConfig, method, body) {
   const response = await fetch(`https://api.telegram.org/bot${botConfig.token}/${method}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -963,15 +972,21 @@ async function telegramApi(botConfig, method, body) {
 
   const data = await response.json().catch(() => ({}));
   if (!response.ok || data.ok === false) {
+    const error = data.description || JSON.stringify(data);
     console.log("[TELEGRAM API ERROR]", {
       bot: botConfig.key,
       method,
       status: response.status,
-      error: data.description || data
+      error
     });
-    return null;
+    return { ok: false, error, result: null };
   }
-  return data.result;
+  return { ok: true, error: null, result: data.result };
+}
+
+async function telegramApi(botConfig, method, body) {
+  const data = await telegramApiResult(botConfig, method, body);
+  return data.ok ? data.result : null;
 }
 
 function stripBotMention(text = "", botConfig) {
@@ -980,19 +995,79 @@ function stripBotMention(text = "", botConfig) {
     .trim();
 }
 
-async function sendTelegramReply(botConfig, message, text) {
-  const sent = await telegramApi(botConfig, "sendMessage", {
-    chat_id: message.chat.id,
-    text: text.slice(0, 3900),
-    reply_to_message_id: isGroupChat(message.chat) ? message.message_id : undefined,
-    allow_sending_without_reply: true
-  });
+function splitTelegramText(text = "", maxLength = TELEGRAM_MESSAGE_CHUNK_SIZE) {
+  const chunks = [];
+  let remaining = text || " ";
 
-  if (sent && isGroupChat(sent.chat)) {
-    await saveTelegramGroupMessage(sent, botConfig.key);
+  while (remaining.length > maxLength) {
+    let cutAt = remaining.lastIndexOf("\n\n", maxLength);
+    if (cutAt < maxLength * 0.5) cutAt = remaining.lastIndexOf("\n", maxLength);
+    if (cutAt < maxLength * 0.5) cutAt = remaining.lastIndexOf(" ", maxLength);
+    if (cutAt < 1) cutAt = maxLength;
+
+    chunks.push(remaining.slice(0, cutAt).trim());
+    remaining = remaining.slice(cutAt).trim();
   }
 
-  return sent;
+  if (remaining) chunks.push(remaining);
+  return chunks.length ? chunks : [" "];
+}
+
+async function logTelegramDelivery({ botConfig, message, method, ok, error, textLength }) {
+  const { error: insertError } = await supabase.from("telegram_delivery_logs").insert({
+    bot_key: botConfig.key,
+    telegram_chat_id: message.chat?.id ? String(message.chat.id) : null,
+    telegram_message_id: message.message_id || null,
+    method,
+    ok,
+    error,
+    text_length: textLength || 0
+  });
+
+  if (insertError) {
+    console.log("[TELEGRAM DELIVERY LOG ERROR]", formatSupabaseError(insertError));
+  }
+}
+
+async function sendTelegramReply(botConfig, message, text) {
+  const chunks = splitTelegramText(text || " ");
+  let firstSent = null;
+
+  for (let index = 0; index < chunks.length; index += 1) {
+    const body = {
+      chat_id: message.chat.id,
+      text: chunks[index],
+      disable_web_page_preview: true
+    };
+
+    if (isGroupChat(message.chat) && index === 0) {
+      body.reply_to_message_id = message.message_id;
+      body.allow_sending_without_reply = true;
+    }
+
+    const delivery = await telegramApiResult(botConfig, "sendMessage", body);
+    await logTelegramDelivery({
+      botConfig,
+      message,
+      method: "sendMessage",
+      ok: delivery.ok,
+      error: delivery.error,
+      textLength: chunks[index].length
+    });
+
+    if (!delivery.ok) {
+      continue;
+    }
+
+    const sent = delivery.result;
+    if (!firstSent) firstSent = sent;
+
+    if (sent && isGroupChat(sent.chat)) {
+      await saveTelegramGroupMessage(sent, botConfig.key);
+    }
+  }
+
+  return firstSent;
 }
 
 async function chooseTelegramReaction(botConfig, message) {
