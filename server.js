@@ -181,6 +181,7 @@ const allowedTelegramGroupIds = new Set(
     .filter(Boolean)
 );
 const TELEGRAM_GROUP_TABLE = process.env.TELEGRAM_GROUP_TABLE || "telegram_group_messages";
+const TELEGRAM_PROCESSING_LOG_TABLE = process.env.TELEGRAM_PROCESSING_LOG_TABLE || "telegram_processing_logs";
 const TELEGRAM_GROUP_FALLBACK_LIMIT = Number(process.env.TELEGRAM_GROUP_FALLBACK_LIMIT || 80);
 const TELEGRAM_REACTIONS_ENABLED = process.env.TELEGRAM_REACTIONS_ENABLED !== "false";
 const TELEGRAM_REACTION_COOLDOWN_MS = Number(process.env.TELEGRAM_REACTION_COOLDOWN_MS || 45000);
@@ -606,7 +607,9 @@ app.get("/api/health", (_req, res) => {
     ok: true,
     build: {
       telegramDeliveryLogs: true,
-      xaiTriggerClassifierDefault: false
+      xaiTriggerClassifierDefault: false,
+      nevanEpisodeTimestamp: true,
+      telegramProcessingLogs: true
     },
     models: Object.keys(modelRegistry),
     providers: Object.fromEntries(
@@ -1050,6 +1053,29 @@ async function logTelegramDelivery({ botConfig, message, method, ok, error, text
   }
 }
 
+async function logTelegramProcessing({
+  botConfig,
+  message,
+  phase,
+  ok = true,
+  error = null,
+  metadata = null
+}) {
+  const { error: insertError } = await supabase.from(TELEGRAM_PROCESSING_LOG_TABLE).insert({
+    bot_key: botConfig?.key || null,
+    telegram_chat_id: message?.chat?.id ? String(message.chat.id) : null,
+    telegram_message_id: message?.message_id || null,
+    phase,
+    ok,
+    error,
+    metadata
+  });
+
+  if (insertError) {
+    console.log("[TELEGRAM PROCESSING LOG ERROR]", formatSupabaseError(insertError));
+  }
+}
+
 async function sendTelegramReply(botConfig, message, text) {
   const chunks = splitTelegramText(text || " ");
   let firstSent = null;
@@ -1146,39 +1172,94 @@ async function maybeReactToTelegramMessage(botConfig, message) {
 
 async function handleTelegramUpdate(botConfig, update) {
   const message = getTelegramMessage(update);
-  if (!message || !message.chat) return;
-  if (!isAllowedTelegramMessage(message)) return;
 
-  if (isGroupChat(message.chat)) {
-    await saveTelegramGroupMessage(message, botConfig.key);
+  try {
+    if (!message || !message.chat) return;
+
+    await logTelegramProcessing({
+      botConfig,
+      message,
+      phase: "received",
+      metadata: {
+        chatType: message.chat.type,
+        fromId: message.from?.id ? String(message.from.id) : null,
+        textLength: getTelegramText(message).length
+      }
+    });
+
+    if (!isAllowedTelegramMessage(message)) {
+      await logTelegramProcessing({ botConfig, message, phase: "not_allowed" });
+      return;
+    }
+
+    if (isGroupChat(message.chat)) {
+      await saveTelegramGroupMessage(message, botConfig.key);
+      await logTelegramProcessing({ botConfig, message, phase: "group_saved" });
+    }
+
+    const text = getTelegramText(message);
+    if (!text) {
+      await logTelegramProcessing({ botConfig, message, phase: "no_text" });
+      return;
+    }
+
+    if (!addressedToBot(message, botConfig)) {
+      await logTelegramProcessing({ botConfig, message, phase: "not_addressed" });
+      await maybeReactToTelegramMessage(botConfig, message);
+      return;
+    }
+
+    await logTelegramProcessing({ botConfig, message, phase: "addressed" });
+
+    await telegramApi(botConfig, "sendChatAction", {
+      chat_id: message.chat.id,
+      action: "typing"
+    });
+
+    await logTelegramProcessing({ botConfig, message, phase: "typing_sent" });
+
+    const isGroup = isGroupChat(message.chat);
+    const groupContext = isGroup ? await loadTelegramGroupContext(message.chat.id) : "";
+    const userMessage = stripBotMention(text, botConfig);
+    const result = await generateChatReply({
+      model: botConfig.model,
+      userMessage,
+      debug: false,
+      fallbackHistoryOverride: isGroup ? [] : null,
+      conversationContextPrompt: groupContext,
+      persistFallback: !isGroup
+    });
+
+    await logTelegramProcessing({
+      botConfig,
+      message,
+      phase: "generated",
+      metadata: { replyLength: (result.reply || "").length }
+    });
+
+    await logTelegramProcessing({ botConfig, message, phase: "before_send" });
+    const sent = await sendTelegramReply(botConfig, message, result.reply || "");
+    await logTelegramProcessing({
+      botConfig,
+      message,
+      phase: "sent",
+      metadata: {
+        sentMessageId: sent?.message_id || null,
+        sent: Boolean(sent)
+      }
+    });
+  } catch (err) {
+    if (message?.chat) {
+      await logTelegramProcessing({
+        botConfig,
+        message,
+        phase: "error",
+        ok: false,
+        error: err.message
+      });
+    }
+    throw err;
   }
-
-  const text = getTelegramText(message);
-  if (!text) return;
-
-  if (!addressedToBot(message, botConfig)) {
-    await maybeReactToTelegramMessage(botConfig, message);
-    return;
-  }
-
-  await telegramApi(botConfig, "sendChatAction", {
-    chat_id: message.chat.id,
-    action: "typing"
-  });
-
-  const isGroup = isGroupChat(message.chat);
-  const groupContext = isGroup ? await loadTelegramGroupContext(message.chat.id) : "";
-  const userMessage = stripBotMention(text, botConfig);
-  const result = await generateChatReply({
-    model: botConfig.model,
-    userMessage,
-    debug: false,
-    fallbackHistoryOverride: isGroup ? [] : null,
-    conversationContextPrompt: groupContext,
-    persistFallback: !isGroup
-  });
-
-  await sendTelegramReply(botConfig, message, result.reply || "");
 }
 
 app.post("/telegram/:botKey", async (req, res) => {
