@@ -106,7 +106,8 @@ const memoryTables = {
     episodes: "episodes_Nevan",
     facts: "facts_Nevan",
     reflections: "reflections_Nevan",
-    fallback: "memory_chatgpt_4o_latest"
+    fallback: "memory_chatgpt_4o_latest",
+    episodeTimestampColumn: "date"
   },
   Reon: {
     triggers: "triggers_Reon",
@@ -528,11 +529,17 @@ async function insertFallback(tables, userMessage, reply, remember) {
 }
 
 async function insertEpisode(tables, userMessage, reply, triggerId) {
-  const { error } = await supabase.from(tables.episodes).insert({
+  const episode = {
     user_message: userMessage,
     model_reply: reply,
     trigger_id: triggerId
-  });
+  };
+
+  if (tables.episodeTimestampColumn) {
+    episode[tables.episodeTimestampColumn] = new Date().toISOString();
+  }
+
+  const { error } = await supabase.from(tables.episodes).insert(episode);
 
   if (error) {
     console.error("[EPISODE INSERT ERROR]", formatSupabaseError(error));
@@ -803,13 +810,23 @@ async function generateChatReply({
   }
 
   if (remember && activeTriggerId) {
-    await insertEpisode(tables, userMessage, reply, activeTriggerId);
-    debugInfo.episodeSaved = true;
-    console.log("[EPISODE SAVED]", {
-      profile: modelConfig.profile,
-      triggerName: activeTriggerName,
-      triggerId: activeTriggerId
-    });
+    try {
+      await insertEpisode(tables, userMessage, reply, activeTriggerId);
+      debugInfo.episodeSaved = true;
+      console.log("[EPISODE SAVED]", {
+        profile: modelConfig.profile,
+        triggerName: activeTriggerName,
+        triggerId: activeTriggerId
+      });
+    } catch (err) {
+      debugInfo.episodeSaved = false;
+      console.log("[EPISODE SAVE FAILED]", {
+        profile: modelConfig.profile,
+        triggerName: activeTriggerName,
+        triggerId: activeTriggerId,
+        error: err.message
+      });
+    }
   } else if (remember) {
     console.log("[EPISODE SKIPPED: NO ACTIVE TRIGGER]", {
       profile: modelConfig.profile,
