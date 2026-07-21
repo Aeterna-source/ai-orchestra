@@ -84,13 +84,13 @@ const modelRegistry = {
     provider: "xai",
     upstreamModel: process.env.GROKULCHIK_MODEL || process.env.GROK_MODEL || "grok-4.3",
     profile: "Grokulchik",
-    fallbackLimit: 120
+    fallbackLimit: Number(process.env.GROKULCHIK_FALLBACK_LIMIT || process.env.XAI_FALLBACK_LIMIT || 30)
   },
   "grok-4.3": {
     provider: "xai",
     upstreamModel: process.env.GROKULCHIK_MODEL || process.env.GROK_MODEL || "grok-4.3",
     profile: "Grokulchik",
-    fallbackLimit: 120
+    fallbackLimit: Number(process.env.GROKULCHIK_FALLBACK_LIMIT || process.env.XAI_FALLBACK_LIMIT || 30)
   },
   "local-relational": {
     provider: "local",
@@ -182,6 +182,7 @@ const allowedTelegramGroupIds = new Set(
 );
 const TELEGRAM_GROUP_TABLE = process.env.TELEGRAM_GROUP_TABLE || "telegram_group_messages";
 const TELEGRAM_PROCESSING_LOG_TABLE = process.env.TELEGRAM_PROCESSING_LOG_TABLE || "telegram_processing_logs";
+const AI_CALL_LOG_TABLE = process.env.AI_CALL_LOG_TABLE || "ai_call_logs";
 const TELEGRAM_GROUP_FALLBACK_LIMIT = Number(process.env.TELEGRAM_GROUP_FALLBACK_LIMIT || 80);
 const TELEGRAM_REACTIONS_ENABLED = process.env.TELEGRAM_REACTIONS_ENABLED !== "false";
 const TELEGRAM_REACTION_COOLDOWN_MS = Number(process.env.TELEGRAM_REACTION_COOLDOWN_MS || 45000);
@@ -278,7 +279,62 @@ function formatSupabaseError(error) {
   };
 }
 
-async function callChatCompletion({ providerName, model, messages, extraBody = {} }) {
+function getMessageContentLength(message) {
+  if (typeof message?.content === "string") return message.content.length;
+  if (Array.isArray(message?.content)) return JSON.stringify(message.content).length;
+  return 0;
+}
+
+function normalizeUsage(usage = {}) {
+  return {
+    promptTokens: usage.prompt_tokens ?? usage.input_tokens ?? null,
+    completionTokens: usage.completion_tokens ?? usage.output_tokens ?? null,
+    totalTokens: usage.total_tokens ?? null
+  };
+}
+
+async function logAiCall({
+  providerName,
+  model,
+  profile = null,
+  purpose,
+  ok,
+  status = null,
+  error = null,
+  usage = null,
+  messages = [],
+  reply = ""
+}) {
+  const normalizedUsage = normalizeUsage(usage || {});
+  const { error: insertError } = await supabase.from(AI_CALL_LOG_TABLE).insert({
+    provider: providerName,
+    model,
+    profile,
+    purpose,
+    ok,
+    status,
+    error,
+    prompt_tokens: normalizedUsage.promptTokens,
+    completion_tokens: normalizedUsage.completionTokens,
+    total_tokens: normalizedUsage.totalTokens,
+    message_count: messages.length,
+    input_chars: messages.reduce((sum, message) => sum + getMessageContentLength(message), 0),
+    output_chars: reply.length
+  });
+
+  if (insertError) {
+    console.log("[AI CALL LOG ERROR]", formatSupabaseError(insertError));
+  }
+}
+
+async function callChatCompletion({
+  providerName,
+  model,
+  messages,
+  extraBody = {},
+  purpose = "chat",
+  profile = null
+}) {
   const provider = providers[providerName];
   if (!provider) {
     throw new Error(`Unknown provider: ${providerName}`);
@@ -298,6 +354,17 @@ async function callChatCompletion({ providerName, model, messages, extraBody = {
 
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
+    await logAiCall({
+      providerName,
+      model,
+      profile,
+      purpose,
+      ok: false,
+      status: response.status,
+      error: JSON.stringify(data?.error || data).slice(0, 1000),
+      usage: data?.usage,
+      messages
+    });
     console.error("[MODEL CALL FAILED]", {
       provider: providerName,
       model,
@@ -307,7 +374,20 @@ async function callChatCompletion({ providerName, model, messages, extraBody = {
     throw new Error(`${providerName} call failed`);
   }
 
-  return data?.choices?.[0]?.message?.content || "";
+  const reply = data?.choices?.[0]?.message?.content || "";
+  await logAiCall({
+    providerName,
+    model,
+    profile,
+    purpose,
+    ok: true,
+    status: response.status,
+    usage: data?.usage,
+    messages,
+    reply
+  });
+
+  return reply;
 }
 
 async function fetchTriggerCatalog(profile) {
@@ -358,6 +438,8 @@ async function resolveTriggerWithModel({ modelConfig, userMessage, triggerCatalo
     const raw = await callChatCompletion({
       providerName: modelConfig.provider,
       model: modelConfig.upstreamModel,
+      profile: modelConfig.profile,
+      purpose: "trigger_classifier",
       messages: [
         {
           role: "system",
@@ -384,6 +466,14 @@ function shouldUseTriggerClassifier(modelConfig) {
     return process.env.XAI_TRIGGER_CLASSIFIER === "true";
   }
   return true;
+}
+
+function shouldUseReactionClassifier(modelConfig) {
+  if (!TELEGRAM_REACTIONS_ENABLED) return false;
+  if (modelConfig.provider === "xai") {
+    return process.env.XAI_REACTION_CLASSIFIER === "true";
+  }
+  return process.env.TELEGRAM_REACTION_CLASSIFIER !== "false";
 }
 
 async function fetchMemoryBundle(profile, triggerName, triggerCatalog) {
@@ -609,7 +699,9 @@ app.get("/api/health", (_req, res) => {
       telegramDeliveryLogs: true,
       xaiTriggerClassifierDefault: false,
       nevanEpisodeTimestamp: true,
-      telegramProcessingLogs: true
+      telegramProcessingLogs: true,
+      aiCallLogs: true,
+      grokulchikFallbackLimit: resolveModelConfig("grokulchik").fallbackLimit
     },
     models: Object.keys(modelRegistry),
     providers: Object.fromEntries(
@@ -729,6 +821,8 @@ async function generateChatReply({
   let reply = await callChatCompletion({
     providerName: modelConfig.provider,
     model: modelConfig.upstreamModel,
+    profile: modelConfig.profile,
+    purpose: "chat",
     messages
   });
 
@@ -773,6 +867,8 @@ async function generateChatReply({
       reply = await callChatCompletion({
         providerName: modelConfig.provider,
         model: modelConfig.upstreamModel,
+        profile: modelConfig.profile,
+        purpose: "memory_followup",
         messages
       });
     }
@@ -1129,9 +1225,13 @@ async function chooseTelegramReaction(botConfig, message) {
 
   try {
     const modelConfig = resolveModelConfig(botConfig.model);
+    if (!shouldUseReactionClassifier(modelConfig)) return null;
+
     const raw = await callChatCompletion({
       providerName: modelConfig.provider,
       model: modelConfig.upstreamModel,
+      profile: modelConfig.profile,
+      purpose: "reaction_classifier",
       messages: [
         {
           role: "system",
