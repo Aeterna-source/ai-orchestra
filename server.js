@@ -84,13 +84,17 @@ const modelRegistry = {
     provider: "xai",
     upstreamModel: process.env.GROKULCHIK_MODEL || process.env.GROK_MODEL || "grok-4.3",
     profile: "Grokulchik",
-    fallbackLimit: Number(process.env.GROKULCHIK_FALLBACK_LIMIT || process.env.XAI_FALLBACK_LIMIT || 10)
+    fallbackLimit: Number(process.env.GROKULCHIK_FALLBACK_LIMIT || process.env.XAI_FALLBACK_LIMIT || 40),
+    fallbackFullLimit: Number(process.env.GROKULCHIK_FULL_FALLBACK_LIMIT || process.env.XAI_FULL_FALLBACK_LIMIT || 10),
+    compactFallback: process.env.GROKULCHIK_COMPACT_FALLBACK !== "false"
   },
   "grok-4.3": {
     provider: "xai",
     upstreamModel: process.env.GROKULCHIK_MODEL || process.env.GROK_MODEL || "grok-4.3",
     profile: "Grokulchik",
-    fallbackLimit: Number(process.env.GROKULCHIK_FALLBACK_LIMIT || process.env.XAI_FALLBACK_LIMIT || 10)
+    fallbackLimit: Number(process.env.GROKULCHIK_FALLBACK_LIMIT || process.env.XAI_FALLBACK_LIMIT || 40),
+    fallbackFullLimit: Number(process.env.GROKULCHIK_FULL_FALLBACK_LIMIT || process.env.XAI_FULL_FALLBACK_LIMIT || 10),
+    compactFallback: process.env.GROKULCHIK_COMPACT_FALLBACK !== "false"
   },
   "local-relational": {
     provider: "local",
@@ -263,6 +267,12 @@ function cleanProtocolTags(text = "") {
     .replace(MEMORY_REQUEST_PATTERN, "")
     .replace(REMEMBER_PATTERN, "")
     .trim();
+}
+
+function truncateText(text = "", maxLength = 260) {
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
+  if (clean.length <= maxLength) return clean;
+  return `${clean.slice(0, Math.max(0, maxLength - 1)).trim()}…`;
 }
 
 function shouldAutoRemember({ activeTriggerId, memoryBlock, requestedTrigger }) {
@@ -606,6 +616,78 @@ async function loadFallbackHistory(profile, limit = 30) {
   ]);
 }
 
+function fallbackRowsToMessages(rows = []) {
+  return rows.flatMap((row) => [
+    { role: "user", content: row.user_message },
+    { role: "assistant", content: cleanProtocolTags(row.model_reply) }
+  ]);
+}
+
+function formatCompactFallback(rows = []) {
+  if (!rows.length) return "";
+
+  const lines = rows.map((row, index) => [
+    `${index + 1}. USER: ${truncateText(row.user_message, 170)}`,
+    `   ASSISTANT: ${truncateText(cleanProtocolTags(row.model_reply), 230)}`
+  ].join("\n"));
+
+  return [
+    "CONTINUITY_TRAIL:",
+    "This is a compact trace of older recent fallback turns. Use it to preserve continuity, tone, recurring themes, and unresolved threads.",
+    "It is not a diagnostic block and must not be quoted directly.",
+    "",
+    ...lines
+  ].join("\n").trim();
+}
+
+async function loadFallbackContext(modelConfig) {
+  const totalLimit = modelConfig.fallbackLimit || 30;
+
+  const { data, error } = await supabase
+    .from(memoryTables[modelConfig.profile].fallback)
+    .select("*")
+    .order("id", { ascending: false })
+    .limit(totalLimit);
+
+  if (error) {
+    console.log("[FALLBACK LOAD ERROR]", {
+      profile: modelConfig.profile,
+      error: formatSupabaseError(error)
+    });
+    return {
+      messages: [],
+      compactPrompt: "",
+      rowCount: 0,
+      fullCount: 0,
+      compactCount: 0
+    };
+  }
+
+  const rows = (data || []).reverse();
+
+  if (!modelConfig.compactFallback) {
+    return {
+      messages: fallbackRowsToMessages(rows),
+      compactPrompt: "",
+      rowCount: rows.length,
+      fullCount: rows.length,
+      compactCount: 0
+    };
+  }
+
+  const fullLimit = Math.max(1, Math.min(modelConfig.fallbackFullLimit || 10, rows.length));
+  const compactRows = rows.slice(0, Math.max(0, rows.length - fullLimit));
+  const fullRows = rows.slice(-fullLimit);
+
+  return {
+    messages: fallbackRowsToMessages(fullRows),
+    compactPrompt: formatCompactFallback(compactRows),
+    rowCount: rows.length,
+    fullCount: fullRows.length,
+    compactCount: compactRows.length
+  };
+}
+
 async function insertFallback(tables, userMessage, reply, remember) {
   const { error } = await supabase.from(tables.fallback).insert({
     user_message: userMessage,
@@ -701,7 +783,9 @@ app.get("/api/health", (_req, res) => {
       nevanEpisodeTimestamp: true,
       telegramProcessingLogs: true,
       aiCallLogs: true,
-      grokulchikFallbackLimit: resolveModelConfig("grokulchik").fallbackLimit
+      grokulchikFallbackLimit: resolveModelConfig("grokulchik").fallbackLimit,
+      grokulchikFullFallbackLimit: resolveModelConfig("grokulchik").fallbackFullLimit,
+      grokulchikCompactFallback: resolveModelConfig("grokulchik").compactFallback
     },
     models: Object.keys(modelRegistry),
     providers: Object.fromEntries(
@@ -740,7 +824,9 @@ function createDebugInfo(model, modelConfig, triggerCatalog) {
     requestedMemoryLoaded: false,
     remember: false,
     rememberSource: "none",
-    episodeSaved: false
+    episodeSaved: false,
+    fallbackFullCount: 0,
+    fallbackCompactCount: 0
   };
 }
 
@@ -798,13 +884,24 @@ async function generateChatReply({
     }
   }
 
-  const fallbackHistory = fallbackHistoryOverride ??
-    await loadFallbackHistory(modelConfig.profile, modelConfig.fallbackLimit || 30);
-  debugInfo.fallbackCount = fallbackHistory.length / 2;
+  const fallbackContext = fallbackHistoryOverride
+    ? {
+        messages: fallbackHistoryOverride,
+        compactPrompt: "",
+        rowCount: fallbackHistoryOverride.length / 2,
+        fullCount: fallbackHistoryOverride.length / 2,
+        compactCount: 0
+      }
+    : await loadFallbackContext(modelConfig);
+  const fallbackHistory = fallbackContext.messages;
+  debugInfo.fallbackCount = fallbackContext.rowCount;
+  debugInfo.fallbackFullCount = fallbackContext.fullCount;
+  debugInfo.fallbackCompactCount = fallbackContext.compactCount;
 
   let messages = [
     { role: "system", content: buildSystemPrompt() },
     { role: "system", content: buildMemoryProtocolPrompt(triggerCatalog) },
+    ...(fallbackContext.compactPrompt ? [{ role: "system", content: fallbackContext.compactPrompt }] : []),
     ...fallbackHistory,
     ...(conversationContextPrompt ? [{ role: "system", content: conversationContextPrompt }] : []),
     ...(memoryBlock ? [{ role: "system", content: "MEMORY:\n" + memoryBlock }] : []),
