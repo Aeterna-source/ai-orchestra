@@ -296,11 +296,35 @@ function getMessageContentLength(message) {
 }
 
 function normalizeUsage(usage = {}) {
+  const promptDetails = usage.prompt_tokens_details || usage.input_tokens_details || {};
+  const completionDetails = usage.completion_tokens_details || usage.output_tokens_details || {};
+
   return {
     promptTokens: usage.prompt_tokens ?? usage.input_tokens ?? null,
     completionTokens: usage.completion_tokens ?? usage.output_tokens ?? null,
-    totalTokens: usage.total_tokens ?? null
+    totalTokens: usage.total_tokens ?? null,
+    cachedTokens: promptDetails.cached_tokens ?? null,
+    reasoningTokens: completionDetails.reasoning_tokens ?? null,
+    costInUsdTicks: usage.cost_in_usd_ticks ?? null
   };
+}
+
+function formatProviderHeaderId(value = "") {
+  return String(value || "")
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+    .slice(0, 128);
+}
+
+function buildProviderHeaders({ providerName, model, profile, purpose }) {
+  const headers = {};
+
+  if (providerName === "xai" && process.env.XAI_PROMPT_CACHE !== "false") {
+    headers["x-grok-conv-id"] = formatProviderHeaderId(
+      process.env.XAI_GROK_CONV_ID || `ai-orchestra-${profile || model}-${purpose}`
+    );
+  }
+
+  return headers;
 }
 
 async function logAiCall({
@@ -327,6 +351,10 @@ async function logAiCall({
     prompt_tokens: normalizedUsage.promptTokens,
     completion_tokens: normalizedUsage.completionTokens,
     total_tokens: normalizedUsage.totalTokens,
+    cached_tokens: normalizedUsage.cachedTokens,
+    reasoning_tokens: normalizedUsage.reasoningTokens,
+    cost_in_usd_ticks: normalizedUsage.costInUsdTicks,
+    raw_usage: usage || null,
     message_count: messages.length,
     input_chars: messages.reduce((sum, message) => sum + getMessageContentLength(message), 0),
     output_chars: reply.length
@@ -357,7 +385,8 @@ async function callChatCompletion({
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${provider.apiKey}`
+      Authorization: `Bearer ${provider.apiKey}`,
+      ...buildProviderHeaders({ providerName, model, profile, purpose })
     },
     body: JSON.stringify({ model, messages, ...extraBody })
   });
