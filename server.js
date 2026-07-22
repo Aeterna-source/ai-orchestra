@@ -203,7 +203,7 @@ const STATIC_TRIGGERS = [
 
 const MEMORY_REQUEST_PATTERN = /<<memory_request:\s*([\w-]+)\s*>>/gi;
 const REMEMBER_PATTERN = /\[\[remember(?::\s*([\w-]+))?\]\]/gi;
-const AUTO_REMEMBER_ON_ACTIVE_TRIGGER = process.env.AUTO_REMEMBER_ON_ACTIVE_TRIGGER !== "false";
+const AUTO_REMEMBER_ON_ACTIVE_TRIGGER = process.env.AUTO_REMEMBER_ON_ACTIVE_TRIGGER === "true";
 
 function resolveModelConfig(model) {
   const config = modelRegistry[model];
@@ -813,6 +813,7 @@ app.get("/api/health", (_req, res) => {
       telegramProcessingLogs: true,
       aiCallLogs: true,
       xaiCacheUsage: true,
+      autoRememberDefault: AUTO_REMEMBER_ON_ACTIVE_TRIGGER,
       grokulchikFallbackLimit: resolveModelConfig("grokulchik").fallbackLimit,
       grokulchikFullFallbackLimit: resolveModelConfig("grokulchik").fallbackFullLimit,
       grokulchikCompactFallback: resolveModelConfig("grokulchik").compactFallback
