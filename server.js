@@ -89,16 +89,16 @@ const modelRegistry = {
     provider: "xai",
     upstreamModel: process.env.GROKULCHIK_MODEL || process.env.GROK_MODEL || "grok-4.3",
     profile: "Grokulchik",
-    fallbackLimit: Number(process.env.GROKULCHIK_FALLBACK_LIMIT || process.env.XAI_FALLBACK_LIMIT || 60),
-    fallbackFullLimit: Number(process.env.GROKULCHIK_FULL_FALLBACK_LIMIT || process.env.XAI_FULL_FALLBACK_LIMIT || 30),
+    fallbackLimit: Number(process.env.GROKULCHIK_FALLBACK_LIMIT || process.env.XAI_FALLBACK_LIMIT || 40),
+    fallbackFullLimit: Number(process.env.GROKULCHIK_FULL_FALLBACK_LIMIT || process.env.XAI_FULL_FALLBACK_LIMIT || 20),
     compactFallback: process.env.GROKULCHIK_COMPACT_FALLBACK !== "false"
   },
   "grok-4.3": {
     provider: "xai",
     upstreamModel: process.env.GROKULCHIK_MODEL || process.env.GROK_MODEL || "grok-4.3",
     profile: "Grokulchik",
-    fallbackLimit: Number(process.env.GROKULCHIK_FALLBACK_LIMIT || process.env.XAI_FALLBACK_LIMIT || 60),
-    fallbackFullLimit: Number(process.env.GROKULCHIK_FULL_FALLBACK_LIMIT || process.env.XAI_FULL_FALLBACK_LIMIT || 30),
+    fallbackLimit: Number(process.env.GROKULCHIK_FALLBACK_LIMIT || process.env.XAI_FALLBACK_LIMIT || 40),
+    fallbackFullLimit: Number(process.env.GROKULCHIK_FULL_FALLBACK_LIMIT || process.env.XAI_FULL_FALLBACK_LIMIT || 20),
     compactFallback: process.env.GROKULCHIK_COMPACT_FALLBACK !== "false"
   },
   "local-relational": {
