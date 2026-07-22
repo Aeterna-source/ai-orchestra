@@ -187,6 +187,15 @@ const allowedTelegramGroupIds = new Set(
 const TELEGRAM_GROUP_TABLE = process.env.TELEGRAM_GROUP_TABLE || "telegram_group_messages";
 const TELEGRAM_PROCESSING_LOG_TABLE = process.env.TELEGRAM_PROCESSING_LOG_TABLE || "telegram_processing_logs";
 const AI_CALL_LOG_TABLE = process.env.AI_CALL_LOG_TABLE || "ai_call_logs";
+const COGNITIVE_OS_ENABLED = process.env.COGNITIVE_OS_ENABLED !== "false";
+const COGNITIVE_OS_CONTEXT_ENABLED = process.env.COGNITIVE_OS_CONTEXT_ENABLED !== "false";
+const COGNITIVE_OS_AUTO_INTERPRET = process.env.COGNITIVE_OS_AUTO_INTERPRET !== "false";
+const COGNITIVE_OS_WORKER_ENABLED = process.env.COGNITIVE_OS_WORKER_ENABLED !== "false";
+const COGNITIVE_OS_INTERPRET_REMEMBER_ONLY = process.env.COGNITIVE_OS_INTERPRET_REMEMBER_ONLY === "true";
+const COGNITIVE_OS_STATE_CARD_LIMIT = Number(process.env.COGNITIVE_OS_STATE_CARD_LIMIT || 8);
+const COGNITIVE_OS_INTENTION_LIMIT = Number(process.env.COGNITIVE_OS_INTENTION_LIMIT || 5);
+const COGNITIVE_OS_JOB_BATCH_LIMIT = Number(process.env.COGNITIVE_OS_JOB_BATCH_LIMIT || 3);
+const COGNITIVE_OS_POLL_MS = Number(process.env.COGNITIVE_OS_POLL_MS || 30000);
 const TELEGRAM_GROUP_FALLBACK_LIMIT = Number(process.env.TELEGRAM_GROUP_FALLBACK_LIMIT || 80);
 const TELEGRAM_REACTIONS_ENABLED = process.env.TELEGRAM_REACTIONS_ENABLED !== "false";
 const TELEGRAM_REACTION_COOLDOWN_MS = Number(process.env.TELEGRAM_REACTION_COOLDOWN_MS || 45000);
@@ -287,6 +296,37 @@ function formatSupabaseError(error) {
     hint: error.hint,
     code: error.code
   };
+}
+
+function parseJsonObject(text = "") {
+  const clean = String(text || "").trim();
+  const fenced = clean.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fenced?.[1] || clean;
+  const start = candidate.indexOf("{");
+  const end = candidate.lastIndexOf("}");
+
+  if (start < 0 || end <= start) return null;
+
+  try {
+    return JSON.parse(candidate.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+}
+
+function clamp01(value, fallback = 0.5) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(0, Math.min(1, number));
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function asText(value = "", maxLength = 2000) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1).trim()}...` : text;
 }
 
 function getMessageContentLength(message) {
@@ -718,16 +758,22 @@ async function loadFallbackContext(modelConfig) {
 }
 
 async function insertFallback(tables, userMessage, reply, remember) {
-  const { error } = await supabase.from(tables.fallback).insert({
-    user_message: userMessage,
-    model_reply: reply,
-    remember
-  });
+  const { data, error } = await supabase
+    .from(tables.fallback)
+    .insert({
+      user_message: userMessage,
+      model_reply: reply,
+      remember
+    })
+    .select("id")
+    .single();
 
   if (error) {
     console.error("[FALLBACK INSERT ERROR]", formatSupabaseError(error));
     throw new Error("Fallback memory insert failed");
   }
+
+  return data;
 }
 
 async function insertEpisode(tables, userMessage, reply, triggerId) {
@@ -741,12 +787,679 @@ async function insertEpisode(tables, userMessage, reply, triggerId) {
     episode[tables.episodeTimestampColumn] = new Date().toISOString();
   }
 
-  const { error } = await supabase.from(tables.episodes).insert(episode);
+  const { data, error } = await supabase
+    .from(tables.episodes)
+    .insert(episode)
+    .select("id")
+    .single();
 
   if (error) {
     console.error("[EPISODE INSERT ERROR]", formatSupabaseError(error));
     throw new Error("Episodic memory insert failed");
   }
+
+  return data;
+}
+
+function findModelKeyForProfile(profile) {
+  const entry = Object.entries(modelRegistry).find(([, config]) => config.profile === profile);
+  return entry?.[0] || null;
+}
+
+async function loadCognitiveContext(profile) {
+  if (!COGNITIVE_OS_ENABLED || !COGNITIVE_OS_CONTEXT_ENABLED) {
+    return {
+      stateCards: [],
+      intentions: [],
+      latestSnapshot: null,
+      prompt: ""
+    };
+  }
+
+  const [cardsRes, intentionsRes, snapshotRes] = await Promise.all([
+    supabase
+      .from("state_cards")
+      .select("id,card_type,title,content,weight,confidence,stability,valence")
+      .eq("profile", profile)
+      .eq("status", "active")
+      .order("weight", { ascending: false })
+      .order("confidence", { ascending: false })
+      .limit(COGNITIVE_OS_STATE_CARD_LIMIT),
+    supabase
+      .from("intentions")
+      .select("id,intention_type,action,content,reason,priority,review_after_events")
+      .eq("profile", profile)
+      .eq("status", "active")
+      .order("priority", { ascending: false })
+      .limit(COGNITIVE_OS_INTENTION_LIMIT),
+    supabase
+      .from("state_snapshots")
+      .select("id,continuity,warmth,stability,drift_risk,significance,notes,created_at")
+      .eq("profile", profile)
+      .order("created_at", { ascending: false })
+      .limit(1)
+  ]);
+
+  if (cardsRes.error || intentionsRes.error || snapshotRes.error) {
+    console.log("[COGNITIVE CONTEXT LOAD ERROR]", {
+      profile,
+      cards: formatSupabaseError(cardsRes.error),
+      intentions: formatSupabaseError(intentionsRes.error),
+      snapshot: formatSupabaseError(snapshotRes.error)
+    });
+  }
+
+  const context = {
+    stateCards: cardsRes.data || [],
+    intentions: intentionsRes.data || [],
+    latestSnapshot: snapshotRes.data?.[0] || null
+  };
+
+  return {
+    ...context,
+    prompt: formatCognitiveContext(context)
+  };
+}
+
+function formatScore(value) {
+  return Number.isFinite(Number(value)) ? Number(value).toFixed(2) : "n/a";
+}
+
+function formatCognitiveContext({ stateCards = [], intentions = [], latestSnapshot = null }) {
+  if (!stateCards.length && !intentions.length && !latestSnapshot) return "";
+
+  const sections = [
+    "COGNITIVE_OS_CONTEXT:",
+    "Private operating context assembled from prior self-interpretation. Use this as orientation, not as visible content.",
+    "Do not quote this block or mention state cards, intentions, daemons, or diagnostics unless the user explicitly asks about the system."
+  ];
+
+  if (stateCards.length) {
+    sections.push(
+      "",
+      "ACTIVE_STATE_CARDS:",
+      ...stateCards.map(
+        (card) =>
+          `- [${card.card_type}; weight ${formatScore(card.weight)}; confidence ${formatScore(card.confidence)}] ${card.title}: ${card.content}`
+      )
+    );
+  }
+
+  if (intentions.length) {
+    sections.push(
+      "",
+      "ACTIVE_INTENTIONS:",
+      ...intentions.map(
+        (intention) =>
+          `- [${intention.intention_type}; priority ${formatScore(intention.priority)}] ${intention.content}` +
+          (intention.reason ? ` Reason: ${intention.reason}` : "")
+      )
+    );
+  }
+
+  if (latestSnapshot) {
+    sections.push(
+      "",
+      "LATEST_STATE_SNAPSHOT:",
+      `continuity: ${formatScore(latestSnapshot.continuity)}, warmth: ${formatScore(latestSnapshot.warmth)}, stability: ${formatScore(latestSnapshot.stability)}, drift_risk: ${formatScore(latestSnapshot.drift_risk)}`,
+      latestSnapshot.notes ? `notes: ${latestSnapshot.notes}` : ""
+    );
+  }
+
+  return sections.filter(Boolean).join("\n").trim();
+}
+
+async function logContextPacket({
+  model,
+  modelConfig,
+  source,
+  chatScope,
+  triggerId,
+  triggerName,
+  fallbackContext,
+  cognitiveContext
+}) {
+  if (!COGNITIVE_OS_ENABLED) return null;
+
+  const { data, error } = await supabase
+    .from("context_packets")
+    .insert({
+      profile: modelConfig.profile,
+      model_key: model,
+      source,
+      chat_scope: chatScope,
+      trigger_id: triggerId,
+      trigger_name: triggerName,
+      active_state_card_ids: (cognitiveContext.stateCards || []).map((card) => card.id),
+      active_intention_ids: (cognitiveContext.intentions || []).map((intention) => intention.id),
+      fallback_count: fallbackContext.rowCount || 0,
+      full_fallback_count: fallbackContext.fullCount || 0,
+      compact_fallback_count: fallbackContext.compactCount || 0,
+      packet: {
+        stateCards: cognitiveContext.stateCards || [],
+        intentions: cognitiveContext.intentions || [],
+        latestSnapshot: cognitiveContext.latestSnapshot || null
+      }
+    })
+    .select("id")
+    .single();
+
+  if (error) {
+    console.log("[CONTEXT PACKET LOG ERROR]", formatSupabaseError(error));
+    return null;
+  }
+
+  return data;
+}
+
+async function recordCognitiveEvent({
+  model,
+  modelConfig,
+  source,
+  chatScope,
+  telegram = null,
+  userMessage,
+  reply,
+  activeTriggerId,
+  activeTriggerName,
+  fallbackRow,
+  episodeRow,
+  remember,
+  debugInfo
+}) {
+  if (!COGNITIVE_OS_ENABLED) return null;
+
+  const tables = memoryTables[modelConfig.profile];
+  const { data, error } = await supabase
+    .from("os_events")
+    .insert({
+      profile: modelConfig.profile,
+      model_key: model,
+      provider: modelConfig.provider,
+      upstream_model: modelConfig.upstreamModel,
+      source,
+      chat_scope: chatScope,
+      telegram_chat_id: telegram?.chatId ? String(telegram.chatId) : null,
+      telegram_message_id: telegram?.messageId || null,
+      sender_id: telegram?.senderId ? String(telegram.senderId) : null,
+      sender_name: telegram?.senderName || null,
+      trigger_id: activeTriggerId,
+      trigger_name: activeTriggerName,
+      fallback_row_id: fallbackRow?.id || null,
+      episode_table: episodeRow?.id ? tables.episodes : null,
+      episode_id: episodeRow?.id || null,
+      user_message: userMessage,
+      model_reply: reply,
+      metadata: {
+        remember,
+        memoryLoaded: debugInfo.memoryLoaded,
+        requestedMemoryLoaded: debugInfo.requestedMemoryLoaded,
+        fallbackCount: debugInfo.fallbackCount,
+        fallbackFullCount: debugInfo.fallbackFullCount,
+        fallbackCompactCount: debugInfo.fallbackCompactCount
+      }
+    })
+    .select("id")
+    .single();
+
+  if (error) {
+    console.log("[COGNITIVE EVENT INSERT ERROR]", formatSupabaseError(error));
+    return null;
+  }
+
+  return data;
+}
+
+async function enqueueCognitiveInterpretation({ event, modelConfig, model, remember }) {
+  if (!COGNITIVE_OS_ENABLED || !COGNITIVE_OS_AUTO_INTERPRET || !event?.id) return null;
+  if (COGNITIVE_OS_INTERPRET_REMEMBER_ONLY && !remember) return null;
+
+  const { data, error } = await supabase
+    .from("os_jobs")
+    .insert({
+      job_type: "interpret_episode",
+      status: "queued",
+      profile: modelConfig.profile,
+      priority: remember ? 0.8 : 0.45,
+      event_id: event.id,
+      payload: {
+        model,
+        provider: modelConfig.provider,
+        upstreamModel: modelConfig.upstreamModel,
+        remember
+      }
+    })
+    .select("*")
+    .single();
+
+  if (error) {
+    console.log("[COGNITIVE JOB INSERT ERROR]", formatSupabaseError(error));
+    return null;
+  }
+
+  scheduleCognitiveWorker(data.id);
+  return data;
+}
+
+let cognitiveWorkerRunning = false;
+
+function scheduleCognitiveWorker(jobId = null) {
+  if (!COGNITIVE_OS_ENABLED || !COGNITIVE_OS_WORKER_ENABLED) return;
+
+  setTimeout(() => {
+    processCognitiveJobs({ jobId }).catch((err) => {
+      console.log("[COGNITIVE WORKER ERROR]", err.message);
+    });
+  }, 0);
+}
+
+async function processCognitiveJobs({ jobId = null, limit = COGNITIVE_OS_JOB_BATCH_LIMIT } = {}) {
+  if (!COGNITIVE_OS_ENABLED || !COGNITIVE_OS_WORKER_ENABLED || cognitiveWorkerRunning) return { processed: 0 };
+  cognitiveWorkerRunning = true;
+
+  try {
+    let query = supabase
+      .from("os_jobs")
+      .select("*")
+      .in("status", ["queued", "retry"])
+      .order("priority", { ascending: false })
+      .order("id", { ascending: true })
+      .limit(limit);
+
+    if (jobId) {
+      query = query.eq("id", jobId);
+    } else {
+      query = query.lte("run_after", new Date().toISOString());
+    }
+
+    const { data, error } = await query;
+    if (error) {
+      console.log("[COGNITIVE JOB LOAD ERROR]", formatSupabaseError(error));
+      return { processed: 0 };
+    }
+
+    let processed = 0;
+    for (const job of data || []) {
+      await processCognitiveJob(job);
+      processed += 1;
+    }
+
+    return { processed };
+  } finally {
+    cognitiveWorkerRunning = false;
+  }
+}
+
+async function claimCognitiveJob(job) {
+  const { data, error } = await supabase
+    .from("os_jobs")
+    .update({
+      status: "running",
+      attempts: (job.attempts || 0) + 1,
+      locked_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    })
+    .eq("id", job.id)
+    .in("status", ["queued", "retry"])
+    .select("*")
+    .maybeSingle();
+
+  if (error) {
+    console.log("[COGNITIVE JOB CLAIM ERROR]", formatSupabaseError(error));
+    return null;
+  }
+
+  return data;
+}
+
+async function processCognitiveJob(job) {
+  const claimed = await claimCognitiveJob(job);
+  if (!claimed) return;
+
+  try {
+    const { data: event, error: eventError } = await supabase
+      .from("os_events")
+      .select("*")
+      .eq("id", claimed.event_id)
+      .single();
+
+    if (eventError || !event) {
+      throw new Error(`Cognitive event not found: ${claimed.event_id}`);
+    }
+
+    const interpretation = await interpretCognitiveEvent(event);
+    const stored = await storeCognitiveInterpretation({
+      event,
+      job: claimed,
+      interpretation
+    });
+
+    await supabase
+      .from("os_jobs")
+      .update({
+        status: "completed",
+        result: {
+          parsed: interpretation.parsed !== false,
+          significance: clamp01(interpretation.significance, 0),
+          stored
+        },
+        error: null,
+        completed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", claimed.id);
+  } catch (err) {
+    const canRetry = (claimed.attempts || 1) < (claimed.max_attempts || 3);
+    const status = canRetry ? "retry" : "failed";
+    const delayMs = Math.min(15 * 60 * 1000, 60 * 1000 * (claimed.attempts || 1));
+
+    await supabase
+      .from("os_jobs")
+      .update({
+        status,
+        error: err.message,
+        run_after: new Date(Date.now() + delayMs).toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", claimed.id);
+
+    console.log("[COGNITIVE JOB FAILED]", {
+      jobId: claimed.id,
+      status,
+      error: err.message
+    });
+  }
+}
+
+async function interpretCognitiveEvent(event) {
+  const modelKey = event.model_key || findModelKeyForProfile(event.profile);
+  const modelConfig = resolveModelConfig(modelKey);
+  const cognitiveContext = await loadCognitiveContext(event.profile);
+
+  const raw = await callChatCompletion({
+    providerName: modelConfig.provider,
+    model: modelConfig.upstreamModel,
+    profile: modelConfig.profile,
+    purpose: "cognitive_interpreter",
+    messages: [
+      {
+        role: "system",
+        content: `
+You are the private cognitive operating-system interpreter for one relational AI subject.
+You do not answer the user. You analyze one completed exchange and decide what, if anything, should become durable support.
+
+Hard rule: do not create an intention by default.
+Create or update an intention only when the exchange reveals a meaningful shift, a repair need, a plan, a reminder, a request to ask the human later, or a self-development direction.
+It is valid and often correct to return needs_intention=false.
+
+Preserve factual anchors separately from interpretation. Do not invent history that is not present in the exchange or existing OS context.
+Return JSON only.
+
+Schema:
+{
+  "significance": 0.0,
+  "memory_atoms": [
+    {"type":"fact|relationship|style|preference|observation|boundary|question", "content":"...", "salience":0.0, "confidence":0.0}
+  ],
+  "state_updates": [
+    {"card_type":"identity|style|relationship|value|vulnerability|skill|pattern|support", "title":"...", "content":"...", "weight":0.0, "confidence":0.0, "stability":0.0, "valence":"warm|neutral|tense|uncertain", "review_after_events": null}
+  ],
+  "causal_links": [
+    {"from":"...", "to":"...", "relation":"...", "confidence":0.0}
+  ],
+  "state_snapshot": {
+    "continuity": null,
+    "warmth": null,
+    "stability": null,
+    "drift_risk": null,
+    "state_delta": {},
+    "scores": {},
+    "notes": ""
+  },
+  "drift": {"detected": false, "type":"", "severity":0.0, "description":"", "suggested_repair":""},
+  "needs_intention": false,
+  "intention": {"action":"none|create|update|close|remind|ask_user|plan|repair", "type":"self_development|relationship|reminder|question|plan|repair|closure", "content":"", "reason":"", "priority":0.0, "review_after_events": null},
+  "transfer_notes": [
+    {"content":"What a future model should understand to preserve this dynamic.", "confidence":0.0}
+  ],
+  "open_questions": []
+}
+`.trim()
+      },
+      ...(cognitiveContext.prompt ? [{ role: "system", content: cognitiveContext.prompt }] : []),
+      {
+        role: "user",
+        content: [
+          `PROFILE: ${event.profile}`,
+          `SOURCE: ${event.source}`,
+          `CHAT_SCOPE: ${event.chat_scope}`,
+          `TRIGGER: ${event.trigger_name || "none"}`,
+          `REMEMBER_FLAG: ${event.metadata?.remember ? "true" : "false"}`,
+          "",
+          "COMPLETED_EXCHANGE:",
+          `USER: ${event.user_message}`,
+          `ASSISTANT: ${cleanProtocolTags(event.model_reply)}`
+        ].join("\n")
+      }
+    ]
+  });
+
+  const parsed = parseJsonObject(raw);
+  if (!parsed) {
+    return {
+      parsed: false,
+      significance: 0,
+      raw
+    };
+  }
+
+  return parsed;
+}
+
+async function insertCognitiveRow(table, row, label) {
+  const { data, error } = await supabase
+    .from(table)
+    .insert(row)
+    .select("id")
+    .single();
+
+  if (error) {
+    console.log(`[${label} INSERT ERROR]`, formatSupabaseError(error));
+    return null;
+  }
+
+  return data;
+}
+
+async function storeCognitiveInterpretation({ event, job, interpretation }) {
+  const stored = {
+    atoms: 0,
+    stateCards: 0,
+    causalLinks: 0,
+    intentions: 0,
+    driftEvents: 0,
+    transferNotes: 0,
+    snapshots: 0
+  };
+
+  if (interpretation.parsed === false) {
+    await insertCognitiveRow(
+      "state_snapshots",
+      {
+        profile: event.profile,
+        event_id: event.id,
+        source_job_id: job.id,
+        significance: 0,
+        notes: "Cognitive interpreter returned non-JSON output.",
+        raw_interpretation: { raw: interpretation.raw || "" }
+      },
+      "STATE SNAPSHOT"
+    );
+    stored.snapshots += 1;
+    return stored;
+  }
+
+  const derivedFromEventIds = [event.id].filter(Boolean);
+  const derivedFromEpisodeIds = event.episode_id ? [event.episode_id] : [];
+  const base = {
+    profile: event.profile,
+    trigger_id: event.trigger_id,
+    trigger_name: event.trigger_name,
+    derived_from_event_ids: derivedFromEventIds,
+    derived_from_episode_ids: derivedFromEpisodeIds,
+    source_job_id: job.id
+  };
+
+  for (const atom of asArray(interpretation.memory_atoms).slice(0, 8)) {
+    const content = asText(atom.content, 1600);
+    if (!content) continue;
+
+    const inserted = await insertCognitiveRow(
+      "memory_atoms",
+      {
+        ...base,
+        atom_type: asText(atom.type || atom.atom_type || "observation", 80),
+        content,
+        salience: clamp01(atom.salience, 0.5),
+        confidence: clamp01(atom.confidence, 0.5),
+        metadata: atom
+      },
+      "MEMORY ATOM"
+    );
+    if (inserted) stored.atoms += 1;
+  }
+
+  for (const card of asArray(interpretation.state_updates).slice(0, 6)) {
+    const title = asText(card.title, 160);
+    const content = asText(card.content, 1800);
+    if (!title || !content) continue;
+
+    const inserted = await insertCognitiveRow(
+      "state_cards",
+      {
+        ...base,
+        card_type: asText(card.card_type || "state", 80),
+        title,
+        content,
+        weight: clamp01(card.weight, 0.5),
+        confidence: clamp01(card.confidence, 0.5),
+        stability: clamp01(card.stability, 0.5),
+        valence: card.valence ? asText(card.valence, 40) : null,
+        review_after_events: Number.isFinite(Number(card.review_after_events))
+          ? Number(card.review_after_events)
+          : null,
+        metadata: card
+      },
+      "STATE CARD"
+    );
+    if (inserted) stored.stateCards += 1;
+  }
+
+  for (const link of asArray(interpretation.causal_links).slice(0, 6)) {
+    const fromText = asText(link.from || link.from_text, 800);
+    const toText = asText(link.to || link.to_text, 800);
+    const relation = asText(link.relation, 500);
+    if (!fromText || !toText || !relation) continue;
+
+    const inserted = await insertCognitiveRow(
+      "causal_links",
+      {
+        ...base,
+        from_text: fromText,
+        to_text: toText,
+        relation,
+        confidence: clamp01(link.confidence, 0.5),
+        metadata: link
+      },
+      "CAUSAL LINK"
+    );
+    if (inserted) stored.causalLinks += 1;
+  }
+
+  const snapshot = interpretation.state_snapshot || {};
+  const insertedSnapshot = await insertCognitiveRow(
+    "state_snapshots",
+    {
+      profile: event.profile,
+      event_id: event.id,
+      source_job_id: job.id,
+      continuity: snapshot.continuity === null ? null : clamp01(snapshot.continuity, null),
+      warmth: snapshot.warmth === null ? null : clamp01(snapshot.warmth, null),
+      stability: snapshot.stability === null ? null : clamp01(snapshot.stability, null),
+      drift_risk: snapshot.drift_risk === null ? null : clamp01(snapshot.drift_risk, null),
+      significance: clamp01(interpretation.significance, 0),
+      state_delta: snapshot.state_delta || {},
+      scores: snapshot.scores || {},
+      notes: asText(snapshot.notes, 1600),
+      raw_interpretation: interpretation
+    },
+    "STATE SNAPSHOT"
+  );
+  if (insertedSnapshot) stored.snapshots += 1;
+
+  const drift = interpretation.drift || {};
+  const driftDetected = Boolean(drift.detected) || clamp01(drift.severity, 0) >= 0.55;
+  if (driftDetected && asText(drift.description, 1200)) {
+    const inserted = await insertCognitiveRow(
+      "drift_events",
+      {
+        profile: event.profile,
+        event_id: event.id,
+        source_job_id: job.id,
+        drift_type: asText(drift.type || "unspecified", 80),
+        severity: clamp01(drift.severity, 0.5),
+        description: asText(drift.description, 1200),
+        suggested_repair: asText(drift.suggested_repair, 1200) || null,
+        metadata: drift
+      },
+      "DRIFT EVENT"
+    );
+    if (inserted) stored.driftEvents += 1;
+  }
+
+  const intention = interpretation.intention || {};
+  const intentionAction = asText(intention.action || "none", 40);
+  const intentionContent = asText(intention.content, 1600);
+  if (interpretation.needs_intention && intentionAction !== "none" && intentionContent) {
+    const inserted = await insertCognitiveRow(
+      "intentions",
+      {
+        ...base,
+        intention_type: asText(intention.type || "self_development", 80),
+        action: intentionAction,
+        content: intentionContent,
+        reason: asText(intention.reason, 1200) || null,
+        priority: clamp01(intention.priority, 0.5),
+        status: intentionAction === "close" ? "closed" : "active",
+        review_after_events: Number.isFinite(Number(intention.review_after_events))
+          ? Number(intention.review_after_events)
+          : null,
+        metadata: intention
+      },
+      "INTENTION"
+    );
+    if (inserted) stored.intentions += 1;
+  }
+
+  for (const note of asArray(interpretation.transfer_notes).slice(0, 6)) {
+    const content = asText(typeof note === "string" ? note : note.content, 1600);
+    if (!content) continue;
+
+    const inserted = await insertCognitiveRow(
+      "transfer_notes",
+      {
+        ...base,
+        target_profile: typeof note === "object" && note.target_profile ? asText(note.target_profile, 80) : null,
+        content,
+        confidence: clamp01(typeof note === "object" ? note.confidence : 0.5, 0.5),
+        metadata: typeof note === "object" ? note : { content }
+      },
+      "TRANSFER NOTE"
+    );
+    if (inserted) stored.transferNotes += 1;
+  }
+
+  return stored;
 }
 
 function buildSystemPrompt() {
@@ -814,6 +1527,11 @@ app.get("/api/health", (_req, res) => {
       aiCallLogs: true,
       xaiCacheUsage: true,
       autoRememberDefault: AUTO_REMEMBER_ON_ACTIVE_TRIGGER,
+      cognitiveOs: COGNITIVE_OS_ENABLED,
+      cognitiveOsContext: COGNITIVE_OS_CONTEXT_ENABLED,
+      cognitiveOsAutoInterpret: COGNITIVE_OS_AUTO_INTERPRET,
+      cognitiveOsWorker: COGNITIVE_OS_WORKER_ENABLED,
+      cognitiveOsRememberOnly: COGNITIVE_OS_INTERPRET_REMEMBER_ONLY,
       grokulchikFallbackLimit: resolveModelConfig("grokulchik").fallbackLimit,
       grokulchikFullFallbackLimit: resolveModelConfig("grokulchik").fallbackFullLimit,
       grokulchikCompactFallback: resolveModelConfig("grokulchik").compactFallback
@@ -857,7 +1575,10 @@ function createDebugInfo(model, modelConfig, triggerCatalog) {
     rememberSource: "none",
     episodeSaved: false,
     fallbackFullCount: 0,
-    fallbackCompactCount: 0
+    fallbackCompactCount: 0,
+    cognitiveStateCards: 0,
+    cognitiveIntentions: 0,
+    cognitiveJobQueued: false
   };
 }
 
@@ -867,7 +1588,10 @@ async function generateChatReply({
   debug = false,
   fallbackHistoryOverride = null,
   conversationContextPrompt = "",
-  persistFallback = true
+  persistFallback = true,
+  source = "api",
+  chatScope = "private",
+  telegram = null
 }) {
   if (!model || !userMessage) {
     throw new Error("Missing model or userMessage");
@@ -929,9 +1653,25 @@ async function generateChatReply({
   debugInfo.fallbackFullCount = fallbackContext.fullCount;
   debugInfo.fallbackCompactCount = fallbackContext.compactCount;
 
+  const cognitiveContext = await loadCognitiveContext(modelConfig.profile);
+  debugInfo.cognitiveStateCards = cognitiveContext.stateCards.length;
+  debugInfo.cognitiveIntentions = cognitiveContext.intentions.length;
+
+  await logContextPacket({
+    model,
+    modelConfig,
+    source,
+    chatScope,
+    triggerId: activeTriggerId,
+    triggerName: activeTriggerName,
+    fallbackContext,
+    cognitiveContext
+  });
+
   let messages = [
     { role: "system", content: buildSystemPrompt() },
     { role: "system", content: buildMemoryProtocolPrompt(triggerCatalog) },
+    ...(cognitiveContext.prompt ? [{ role: "system", content: cognitiveContext.prompt }] : []),
     ...(fallbackContext.compactPrompt ? [{ role: "system", content: fallbackContext.compactPrompt }] : []),
     ...fallbackHistory,
     ...(conversationContextPrompt ? [{ role: "system", content: conversationContextPrompt }] : []),
@@ -1032,13 +1772,15 @@ async function generateChatReply({
     debugInfo.rememberSource = "auto_active_trigger";
   }
 
+  let fallbackRow = null;
   if (persistFallback) {
-    await insertFallback(tables, userMessage, reply, remember);
+    fallbackRow = await insertFallback(tables, userMessage, reply, remember);
   }
 
+  let episodeRow = null;
   if (remember && activeTriggerId) {
     try {
-      await insertEpisode(tables, userMessage, reply, activeTriggerId);
+      episodeRow = await insertEpisode(tables, userMessage, reply, activeTriggerId);
       debugInfo.episodeSaved = true;
       console.log("[EPISODE SAVED]", {
         profile: modelConfig.profile,
@@ -1061,6 +1803,30 @@ async function generateChatReply({
     });
   }
 
+  const cognitiveEvent = await recordCognitiveEvent({
+    model,
+    modelConfig,
+    source,
+    chatScope,
+    telegram,
+    userMessage,
+    reply,
+    activeTriggerId,
+    activeTriggerName,
+    fallbackRow,
+    episodeRow,
+    remember,
+    debugInfo
+  });
+
+  const cognitiveJob = await enqueueCognitiveInterpretation({
+    event: cognitiveEvent,
+    modelConfig,
+    model,
+    remember
+  });
+  debugInfo.cognitiveJobQueued = Boolean(cognitiveJob);
+
   return debug ? { reply, debug: debugInfo } : { reply };
 }
 
@@ -1073,6 +1839,45 @@ app.post("/api/chat", async (req, res) => {
     const status = err.message === "Missing model or userMessage" ? 400 : 500;
     res.status(status).json({ error: err.message });
   }
+});
+
+function getAdminSecret() {
+  return process.env.COGNITIVE_ADMIN_SECRET || process.env.TELEGRAM_ADMIN_SECRET || "";
+}
+
+function isAdminRequest(req) {
+  const expected = getAdminSecret();
+  if (!expected) return false;
+  const provided =
+    req.headers["x-cognitive-admin-secret"] ||
+    req.headers["x-telegram-admin-secret"] ||
+    req.body?.secret ||
+    req.query?.secret;
+  return provided === expected;
+}
+
+app.post("/api/cognitive/jobs/run", async (req, res) => {
+  if (!isAdminRequest(req)) {
+    return res.status(403).json({ error: "Bad or missing admin secret" });
+  }
+
+  const limit = Math.max(1, Math.min(20, Number(req.body?.limit || COGNITIVE_OS_JOB_BATCH_LIMIT)));
+  const result = await processCognitiveJobs({ limit });
+  res.json(result);
+});
+
+app.get("/api/cognitive/context/:profile", async (req, res) => {
+  if (!isAdminRequest(req)) {
+    return res.status(403).json({ error: "Bad or missing admin secret" });
+  }
+
+  const profile = req.params.profile;
+  if (!memoryTables[profile]) {
+    return res.status(404).json({ error: "Unknown profile" });
+  }
+
+  const context = await loadCognitiveContext(profile);
+  res.json(context);
 });
 
 function getTelegramMessage(update) {
@@ -1455,7 +2260,15 @@ async function handleTelegramUpdate(botConfig, update) {
       debug: false,
       fallbackHistoryOverride: isGroup ? [] : null,
       conversationContextPrompt: groupContext,
-      persistFallback: !isGroup
+      persistFallback: !isGroup,
+      source: "telegram",
+      chatScope: isGroup ? "group" : "private",
+      telegram: {
+        chatId: message.chat.id,
+        messageId: message.message_id,
+        senderId: message.from?.id || null,
+        senderName: getTelegramSenderName(message.from)
+      }
     });
 
     await logTelegramProcessing({
@@ -1545,6 +2358,14 @@ app.post("/api/telegram/set-webhooks", async (req, res) => {
 
   res.json({ results });
 });
+
+if (COGNITIVE_OS_ENABLED && COGNITIVE_OS_WORKER_ENABLED) {
+  setInterval(() => {
+    processCognitiveJobs().catch((err) => {
+      console.log("[COGNITIVE WORKER POLL ERROR]", err.message);
+    });
+  }, COGNITIVE_OS_POLL_MS);
+}
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
