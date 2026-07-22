@@ -9,7 +9,12 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 
-if (!process.env.SUPABASE_URL || (!process.env.SUPABASE_KEY && !process.env.SUPABASE_SERVICE_ROLE_KEY)) {
+const supabaseServerKey =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SECRET_KEY ||
+  process.env.SUPABASE_KEY;
+
+if (!process.env.SUPABASE_URL || !supabaseServerKey) {
   throw new Error("Missing Supabase credentials");
 }
 
@@ -19,7 +24,7 @@ if (!process.env.OPENAI_API_KEY) {
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY
+  supabaseServerKey
 );
 
 const providers = {
@@ -1532,6 +1537,12 @@ app.get("/api/health", (_req, res) => {
       cognitiveOsAutoInterpret: COGNITIVE_OS_AUTO_INTERPRET,
       cognitiveOsWorker: COGNITIVE_OS_WORKER_ENABLED,
       cognitiveOsRememberOnly: COGNITIVE_OS_INTERPRET_REMEMBER_ONLY,
+      supabaseSecretKeySupported: true,
+      supabaseServerKeySource: process.env.SUPABASE_SERVICE_ROLE_KEY
+        ? "SUPABASE_SERVICE_ROLE_KEY"
+        : process.env.SUPABASE_SECRET_KEY
+          ? "SUPABASE_SECRET_KEY"
+          : "SUPABASE_KEY",
       grokulchikFallbackLimit: resolveModelConfig("grokulchik").fallbackLimit,
       grokulchikFullFallbackLimit: resolveModelConfig("grokulchik").fallbackFullLimit,
       grokulchikCompactFallback: resolveModelConfig("grokulchik").compactFallback
