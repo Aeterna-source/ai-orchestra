@@ -1198,6 +1198,11 @@ Create or update an intention only when the exchange reveals a meaningful shift,
 It is valid and often correct to return needs_intention=false.
 
 Preserve factual anchors separately from interpretation. Do not invent history that is not present in the exchange or existing OS context.
+Write durable memory in clear operational language, not decorative declarations.
+Prefer the user's conversation language for user-facing concepts, and avoid awkward abstract labels.
+Never use words like "domination" for relational continuity; use "centrality", "salience", "importance", "sustained connection", or a plain sentence instead.
+Snapshot scores are absolute current estimates from 0.0 to 1.0. They are not deltas.
+If continuity increased by 0.10, put that in state_delta and still set continuity to the current absolute level, for example 0.85.
 Return JSON only.
 
 Schema:
