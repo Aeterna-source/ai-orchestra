@@ -2088,6 +2088,7 @@ app.get("/api/health", (_req, res) => {
       cognitiveOsWorker: COGNITIVE_OS_WORKER_ENABLED,
       cognitiveOsRememberOnly: COGNITIVE_OS_INTERPRET_REMEMBER_ONLY,
       cognitiveOsPostInterpretRemember: COGNITIVE_OS_POST_INTERPRET_REMEMBER_ENABLED,
+      cognitiveOsBiographicalRemember: true,
       cognitiveOsMetaMemory: true,
       cognitiveOsStateVectors: true,
       supabaseSecretKeySupported: true,
