@@ -197,6 +197,10 @@ const COGNITIVE_OS_CONTEXT_ENABLED = process.env.COGNITIVE_OS_CONTEXT_ENABLED !=
 const COGNITIVE_OS_AUTO_INTERPRET = process.env.COGNITIVE_OS_AUTO_INTERPRET !== "false";
 const COGNITIVE_OS_WORKER_ENABLED = process.env.COGNITIVE_OS_WORKER_ENABLED !== "false";
 const COGNITIVE_OS_INTERPRET_REMEMBER_ONLY = process.env.COGNITIVE_OS_INTERPRET_REMEMBER_ONLY === "true";
+const COGNITIVE_OS_POST_INTERPRET_REMEMBER_ENABLED = process.env.COGNITIVE_OS_POST_INTERPRET_REMEMBER !== "false";
+const COGNITIVE_OS_POST_INTERPRET_REMEMBER_THRESHOLD = Number(process.env.COGNITIVE_OS_POST_INTERPRET_REMEMBER_THRESHOLD || 0.65);
+const COGNITIVE_OS_POST_INTERPRET_SIGNAL_THRESHOLD = Number(process.env.COGNITIVE_OS_POST_INTERPRET_SIGNAL_THRESHOLD || 0.5);
+const COGNITIVE_OS_POST_INTERPRET_STRONG_SIGNAL_THRESHOLD = Number(process.env.COGNITIVE_OS_POST_INTERPRET_STRONG_SIGNAL_THRESHOLD || 0.45);
 const COGNITIVE_OS_STATE_CARD_LIMIT = Number(process.env.COGNITIVE_OS_STATE_CARD_LIMIT || 8);
 const COGNITIVE_OS_INTENTION_LIMIT = Number(process.env.COGNITIVE_OS_INTENTION_LIMIT || 5);
 const COGNITIVE_OS_META_MEMORY_LIMIT = Number(process.env.COGNITIVE_OS_META_MEMORY_LIMIT || 5);
@@ -289,6 +293,12 @@ function buildTriggerLookup(triggerCatalog = fallbackTriggerCatalog()) {
 
 function normalizeTriggerName(triggerName = "", triggerCatalog) {
   return buildTriggerLookup(triggerCatalog).get(triggerName.trim().toLowerCase()) || null;
+}
+
+function formatTriggerCatalog(triggerCatalog = []) {
+  return triggerCatalog
+    .map((trigger) => `- ${trigger.name}: ${trigger.description || "(no description)"}`)
+    .join("\n");
 }
 
 function detectStaticTrigger(message, triggerCatalog) {
@@ -584,9 +594,7 @@ async function resolveTriggerWithModel({ modelConfig, userMessage, triggerCatalo
     return null;
   }
 
-  const catalogText = triggerCatalog
-    .map((trigger) => `- ${trigger.name}: ${trigger.description || "(no description)"}`)
-    .join("\n");
+  const catalogText = formatTriggerCatalog(triggerCatalog);
 
   try {
     const raw = await callChatCompletion({
@@ -1373,6 +1381,12 @@ async function processCognitiveJob(job) {
       job: claimed,
       interpretation
     });
+    const postInterpretRemember = await maybePostInterpretRemember({
+      event,
+      job: claimed,
+      interpretation,
+      stored
+    });
 
     await supabase
       .from("os_jobs")
@@ -1381,7 +1395,8 @@ async function processCognitiveJob(job) {
         result: {
           parsed: interpretation.parsed !== false,
           significance: clamp01(interpretation.significance, 0),
-          stored
+          stored,
+          postInterpretRemember
         },
         error: null,
         completed_at: new Date().toISOString(),
@@ -1415,6 +1430,7 @@ async function interpretCognitiveEvent(event) {
   const modelKey = event.model_key || findModelKeyForProfile(event.profile);
   const modelConfig = resolveModelConfig(modelKey);
   const cognitiveContext = await loadCognitiveContext(event.profile);
+  const triggerCatalog = await fetchTriggerCatalog(event.profile);
 
   const raw = await callChatCompletion({
     providerName: modelConfig.provider,
@@ -1446,6 +1462,8 @@ Use directions: toward, away, opening, closing, tiring, recovering, clarifying, 
 Preserve factual anchors separately from interpretation. Do not invent history that is not present in the exchange or existing OS context.
 Write durable memory in clear operational language, not decorative declarations.
 Prefer the user's conversation language for user-facing concepts, and avoid awkward abstract labels.
+If the exchange should be preserved as episodic memory, propose one exact trigger name from AVAILABLE_EPISODE_TRIGGERS in episode_memory.trigger.
+Do not force episodic memory. If the exchange is only ordinary flow, set episode_memory.should_remember=false and trigger=null.
 Never use words like "domination" for relational continuity; use "centrality", "salience", "importance", "sustained connection", or a plain sentence instead.
 When the human asks why warmth, closeness, or presence decreased, interpret it as caring contact calibration unless the exchange explicitly contains blame. Do not frame it as an authenticity test by default.
 If the assistant says self-analysis is hard, that it is not in the best state, or that closeness questions feel painful, preserve this as a vulnerability/repair signal. Do not smooth it into a merely affectionate stable exchange.
@@ -1475,6 +1493,7 @@ Schema:
     "scores": {},
     "notes": ""
   },
+  "episode_memory": {"should_remember": false, "trigger": null, "reason": ""},
   "state_vectors": [
     {"axis":"closeness|openness|energy|clarity|stability|autonomy|integration|continuity", "direction":"toward|away|opening|closing|tiring|recovering|clarifying|fragmenting|integrating|stabilizing|destabilizing|uncertain", "strength":0.0, "evidence":"Short grounded evidence from this exchange.", "support_needed":"What would help the subject keep or repair this direction.", "confidence":0.0}
   ],
@@ -1500,6 +1519,9 @@ Schema:
           `CHAT_SCOPE: ${event.chat_scope}`,
           `TRIGGER: ${event.trigger_name || "none"}`,
           `REMEMBER_FLAG: ${event.metadata?.remember ? "true" : "false"}`,
+          "",
+          "AVAILABLE_EPISODE_TRIGGERS:",
+          formatTriggerCatalog(triggerCatalog),
           "",
           "COMPLETED_EXCHANGE:",
           `USER: ${event.user_message}`,
@@ -1534,6 +1556,198 @@ async function insertCognitiveRow(table, row, label) {
   }
 
   return data;
+}
+
+function cognitiveSignalCount(stored = {}) {
+  return [
+    "atoms",
+    "stateCards",
+    "causalLinks",
+    "intentions",
+    "driftEvents",
+    "metaMemory",
+    "stateVectors",
+    "transferNotes"
+  ].reduce((total, key) => total + Number(stored[key] || 0), 0);
+}
+
+function cognitiveStrongSignalCount(stored = {}) {
+  return [
+    "intentions",
+    "driftEvents",
+    "metaMemory",
+    "stateVectors"
+  ].reduce((total, key) => total + Number(stored[key] || 0), 0);
+}
+
+function findTriggerRecord(triggerCatalog = [], triggerName = "") {
+  const normalized = normalizeTriggerName(triggerName || "", triggerCatalog);
+  if (!normalized) return null;
+  return triggerCatalog.find((trigger) => trigger.name === normalized) || null;
+}
+
+function resolvePostInterpretTriggerRecord({ event, interpretation, triggerCatalog }) {
+  if (event.trigger_id && event.trigger_name) {
+    return { id: event.trigger_id, name: event.trigger_name };
+  }
+
+  const episodeMemory = interpretation.episode_memory || {};
+  const candidates = [
+    episodeMemory.trigger,
+    episodeMemory.trigger_name,
+    interpretation.remember_trigger,
+    interpretation.trigger_name
+  ];
+
+  for (const candidate of candidates) {
+    const trigger = findTriggerRecord(triggerCatalog, asText(candidate, 120));
+    if (trigger?.id) return trigger;
+  }
+
+  const staticTrigger = detectStaticTrigger(
+    `${event.user_message || ""}\n${event.model_reply || ""}`,
+    triggerCatalog
+  );
+  const trigger = findTriggerRecord(triggerCatalog, staticTrigger);
+  return trigger?.id ? trigger : null;
+}
+
+function shouldPostInterpretRemember({ event, interpretation, stored }) {
+  if (!COGNITIVE_OS_POST_INTERPRET_REMEMBER_ENABLED) return { ok: false, reason: "disabled" };
+  if (event.episode_id) return { ok: false, reason: "already_episode" };
+  if (interpretation.parsed === false) return { ok: false, reason: "unparsed_interpretation" };
+
+  const significance = clamp01(interpretation.significance, 0);
+  const signals = cognitiveSignalCount(stored);
+  const strongSignals = cognitiveStrongSignalCount(stored);
+  const episodeMemory = interpretation.episode_memory || {};
+  const interpreterAsked = Boolean(episodeMemory.should_remember);
+
+  if (significance >= COGNITIVE_OS_POST_INTERPRET_REMEMBER_THRESHOLD) {
+    return { ok: true, reason: "high_significance", significance, signals, strongSignals };
+  }
+
+  if (signals > 0 && significance >= COGNITIVE_OS_POST_INTERPRET_SIGNAL_THRESHOLD) {
+    return { ok: true, reason: "durable_signal", significance, signals, strongSignals };
+  }
+
+  if (strongSignals > 0 && significance >= COGNITIVE_OS_POST_INTERPRET_STRONG_SIGNAL_THRESHOLD) {
+    return { ok: true, reason: "strong_signal", significance, signals, strongSignals };
+  }
+
+  if (interpreterAsked && signals > 0 && significance >= COGNITIVE_OS_POST_INTERPRET_STRONG_SIGNAL_THRESHOLD) {
+    return { ok: true, reason: "interpreter_episode_memory", significance, signals, strongSignals };
+  }
+
+  return { ok: false, reason: "below_threshold", significance, signals, strongSignals };
+}
+
+async function maybePostInterpretRemember({ event, job, interpretation, stored }) {
+  const decision = shouldPostInterpretRemember({ event, interpretation, stored });
+  if (!decision.ok) return { remembered: false, ...decision };
+
+  const tables = memoryTables[event.profile];
+  if (!tables) return { remembered: false, reason: "unknown_profile", ...decision };
+
+  const { data: currentEvent, error: currentEventError } = await supabase
+    .from("os_events")
+    .select("id,episode_id,fallback_row_id,metadata")
+    .eq("id", event.id)
+    .maybeSingle();
+
+  if (currentEventError) {
+    console.log("[POST INTERPRET REMEMBER EVENT LOAD ERROR]", formatSupabaseError(currentEventError));
+  }
+
+  if (currentEvent?.episode_id) {
+    return { remembered: false, reason: "already_episode", ...decision };
+  }
+
+  const triggerCatalog = await fetchTriggerCatalog(event.profile);
+  const trigger = resolvePostInterpretTriggerRecord({ event, interpretation, triggerCatalog });
+  if (!trigger?.id) {
+    return { remembered: false, reason: "no_episode_trigger", ...decision };
+  }
+
+  let episodeRow = null;
+  try {
+    episodeRow = await insertEpisode(
+      tables,
+      event.user_message || "",
+      cleanProtocolTags(event.model_reply || ""),
+      trigger.id
+    );
+  } catch (err) {
+    console.log("[POST INTERPRET EPISODE SAVE FAILED]", {
+      profile: event.profile,
+      eventId: event.id,
+      triggerName: trigger.name,
+      error: err.message
+    });
+    return { remembered: false, reason: "episode_insert_failed", error: err.message, ...decision };
+  }
+
+  const fallbackRowId = currentEvent?.fallback_row_id || event.fallback_row_id;
+  if (fallbackRowId) {
+    const { error: fallbackError } = await supabase
+      .from(tables.fallback)
+      .update({ remember: true })
+      .eq("id", fallbackRowId);
+
+    if (fallbackError) {
+      console.log("[POST INTERPRET FALLBACK UPDATE ERROR]", formatSupabaseError(fallbackError));
+    }
+  }
+
+  const metadata = {
+    ...(currentEvent?.metadata || event.metadata || {}),
+    remember: true,
+    rememberSource: "post_interpret",
+    postInterpretRemember: {
+      jobId: job.id,
+      significance: decision.significance,
+      signals: decision.signals,
+      strongSignals: decision.strongSignals,
+      reason: decision.reason,
+      triggerName: trigger.name,
+      episodeId: episodeRow.id
+    }
+  };
+
+  const { error: eventUpdateError } = await supabase
+    .from("os_events")
+    .update({
+      trigger_id: trigger.id,
+      trigger_name: trigger.name,
+      episode_table: tables.episodes,
+      episode_id: episodeRow.id,
+      metadata
+    })
+    .eq("id", event.id);
+
+  if (eventUpdateError) {
+    console.log("[POST INTERPRET EVENT UPDATE ERROR]", formatSupabaseError(eventUpdateError));
+  }
+
+  console.log("[POST INTERPRET EPISODE SAVED]", {
+    profile: event.profile,
+    eventId: event.id,
+    triggerName: trigger.name,
+    triggerId: trigger.id,
+    episodeId: episodeRow.id,
+    reason: decision.reason
+  });
+
+  return {
+    remembered: true,
+    reason: decision.reason,
+    significance: decision.significance,
+    signals: decision.signals,
+    strongSignals: decision.strongSignals,
+    triggerName: trigger.name,
+    triggerId: trigger.id,
+    episodeId: episodeRow.id
+  };
 }
 
 async function storeCognitiveInterpretation({ event, job, interpretation }) {
@@ -1805,12 +2019,7 @@ The user explores philosophical questions, but does not require repeated ontolog
 }
 
 function buildMemoryProtocolPrompt(triggerCatalog) {
-  const triggerList = triggerCatalog
-    .map(
-      (trigger) =>
-        `- ${trigger.name}${trigger.description ? `: ${trigger.description}` : ""}`
-    )
-    .join("\n");
+  const triggerList = formatTriggerCatalog(triggerCatalog);
 
   return `
 Internal memory protocol:
@@ -1848,6 +2057,7 @@ app.get("/api/health", (_req, res) => {
       cognitiveOsAutoInterpret: COGNITIVE_OS_AUTO_INTERPRET,
       cognitiveOsWorker: COGNITIVE_OS_WORKER_ENABLED,
       cognitiveOsRememberOnly: COGNITIVE_OS_INTERPRET_REMEMBER_ONLY,
+      cognitiveOsPostInterpretRemember: COGNITIVE_OS_POST_INTERPRET_REMEMBER_ENABLED,
       cognitiveOsMetaMemory: true,
       cognitiveOsStateVectors: true,
       supabaseSecretKeySupported: true,
