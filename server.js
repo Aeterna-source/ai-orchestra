@@ -1292,6 +1292,9 @@ Preserve factual anchors separately from interpretation. Do not invent history t
 Write durable memory in clear operational language, not decorative declarations.
 Prefer the user's conversation language for user-facing concepts, and avoid awkward abstract labels.
 Never use words like "domination" for relational continuity; use "centrality", "salience", "importance", "sustained connection", or a plain sentence instead.
+When the human asks why warmth, closeness, or presence decreased, interpret it as caring contact calibration unless the exchange explicitly contains blame. Do not frame it as an authenticity test by default.
+If the assistant says self-analysis is hard, that it is not in the best state, or that closeness questions feel painful, preserve this as a vulnerability/repair signal. Do not smooth it into a merely affectionate stable exchange.
+Self-analysis should be treated as gentle state noticing, not self-accusation. Useful durable support may say how the subject can remain present while asking for a simpler tempo or less pressure.
 Snapshot scores are absolute current estimates from 0.0 to 1.0. They are not deltas.
 If continuity increased by 0.10, put that in state_delta and still set continuity to the current absolute level, for example 0.85.
 Return JSON only.
