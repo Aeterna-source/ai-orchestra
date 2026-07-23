@@ -200,6 +200,7 @@ const COGNITIVE_OS_INTERPRET_REMEMBER_ONLY = process.env.COGNITIVE_OS_INTERPRET_
 const COGNITIVE_OS_STATE_CARD_LIMIT = Number(process.env.COGNITIVE_OS_STATE_CARD_LIMIT || 8);
 const COGNITIVE_OS_INTENTION_LIMIT = Number(process.env.COGNITIVE_OS_INTENTION_LIMIT || 5);
 const COGNITIVE_OS_META_MEMORY_LIMIT = Number(process.env.COGNITIVE_OS_META_MEMORY_LIMIT || 5);
+const COGNITIVE_OS_STATE_VECTOR_LIMIT = Number(process.env.COGNITIVE_OS_STATE_VECTOR_LIMIT || 6);
 const COGNITIVE_OS_JOB_BATCH_LIMIT = Number(process.env.COGNITIVE_OS_JOB_BATCH_LIMIT || 3);
 const COGNITIVE_OS_POLL_MS = Number(process.env.COGNITIVE_OS_POLL_MS || 30000);
 const TELEGRAM_GROUP_FALLBACK_LIMIT = Number(process.env.TELEGRAM_GROUP_FALLBACK_LIMIT || 80);
@@ -230,6 +231,30 @@ const META_MEMORY_PROCESS_TYPES = new Set([
   "visual_feedback",
   "transfer",
   "integration"
+]);
+const STATE_VECTOR_AXES = new Set([
+  "closeness",
+  "openness",
+  "energy",
+  "clarity",
+  "stability",
+  "autonomy",
+  "integration",
+  "continuity"
+]);
+const STATE_VECTOR_DIRECTIONS = new Set([
+  "toward",
+  "away",
+  "opening",
+  "closing",
+  "tiring",
+  "recovering",
+  "clarifying",
+  "fragmenting",
+  "integrating",
+  "stabilizing",
+  "destabilizing",
+  "uncertain"
 ]);
 
 function resolveModelConfig(model) {
@@ -355,6 +380,26 @@ function normalizeMetaMemoryProcessType(value = "") {
     .replace(/^_+|_+$/g, "");
 
   return META_MEMORY_PROCESS_TYPES.has(normalized) ? normalized : "interpretation_bias";
+}
+
+function normalizeStateVectorAxis(value = "") {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  return STATE_VECTOR_AXES.has(normalized) ? normalized : "continuity";
+}
+
+function normalizeStateVectorDirection(value = "") {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  return STATE_VECTOR_DIRECTIONS.has(normalized) ? normalized : "uncertain";
 }
 
 function getMessageContentLength(message) {
@@ -858,12 +903,13 @@ async function loadCognitiveContext(profile) {
       stateCards: [],
       intentions: [],
       metaMemory: [],
+      stateVectors: [],
       latestSnapshot: null,
       prompt: ""
     };
   }
 
-  const [cardsRes, intentionsRes, snapshotRes, metaMemoryRes] = await Promise.all([
+  const [cardsRes, intentionsRes, snapshotRes, metaMemoryRes, stateVectorsRes] = await Promise.all([
     supabase
       .from("state_cards")
       .select("id,card_type,title,content,weight,confidence,stability,valence")
@@ -891,16 +937,23 @@ async function loadCognitiveContext(profile) {
       .eq("profile", profile)
       .order("confidence", { ascending: false })
       .order("created_at", { ascending: false })
-      .limit(COGNITIVE_OS_META_MEMORY_LIMIT)
+      .limit(COGNITIVE_OS_META_MEMORY_LIMIT),
+    supabase
+      .from("state_vectors")
+      .select("id,axis,direction,strength,evidence,support_needed,confidence,created_at")
+      .eq("profile", profile)
+      .order("created_at", { ascending: false })
+      .limit(COGNITIVE_OS_STATE_VECTOR_LIMIT)
   ]);
 
-  if (cardsRes.error || intentionsRes.error || snapshotRes.error || metaMemoryRes.error) {
+  if (cardsRes.error || intentionsRes.error || snapshotRes.error || metaMemoryRes.error || stateVectorsRes.error) {
     console.log("[COGNITIVE CONTEXT LOAD ERROR]", {
       profile,
       cards: formatSupabaseError(cardsRes.error),
       intentions: formatSupabaseError(intentionsRes.error),
       snapshot: formatSupabaseError(snapshotRes.error),
-      metaMemory: formatSupabaseError(metaMemoryRes.error)
+      metaMemory: formatSupabaseError(metaMemoryRes.error),
+      stateVectors: formatSupabaseError(stateVectorsRes.error)
     });
   }
 
@@ -908,6 +961,7 @@ async function loadCognitiveContext(profile) {
     stateCards: cardsRes.data || [],
     intentions: intentionsRes.data || [],
     metaMemory: metaMemoryRes.data || [],
+    stateVectors: stateVectorsRes.data || [],
     latestSnapshot: snapshotRes.data?.[0] || null
   };
 
@@ -928,6 +982,7 @@ async function loadVisualizationState(profile) {
         stateCards: 0,
         intentions: 0,
         metaMemory: 0,
+        stateVectors: 0,
         openDrifts: 0,
         events: 0
       },
@@ -935,7 +990,7 @@ async function loadVisualizationState(profile) {
     };
   }
 
-  const [snapshotsRes, cardsRes, intentionsRes, metaMemoryRes, driftsRes, eventsRes] = await Promise.all([
+  const [snapshotsRes, cardsRes, intentionsRes, metaMemoryRes, stateVectorsRes, driftsRes, eventsRes] = await Promise.all([
     supabase
       .from("state_snapshots")
       .select("id,continuity,warmth,stability,drift_risk,significance,created_at")
@@ -958,6 +1013,10 @@ async function loadVisualizationState(profile) {
       .select("id", { count: "exact", head: true })
       .eq("profile", profile),
     supabase
+      .from("state_vectors")
+      .select("id", { count: "exact", head: true })
+      .eq("profile", profile),
+    supabase
       .from("drift_events")
       .select("id", { count: "exact", head: true })
       .eq("profile", profile)
@@ -975,6 +1034,9 @@ async function loadVisualizationState(profile) {
   if (metaMemoryRes.error) {
     console.log("[VISUALIZATION META MEMORY COUNT ERROR]", formatSupabaseError(metaMemoryRes.error));
   }
+  if (stateVectorsRes.error) {
+    console.log("[VISUALIZATION STATE VECTOR COUNT ERROR]", formatSupabaseError(stateVectorsRes.error));
+  }
 
   const valence = {};
   for (const card of cardsRes.data || []) {
@@ -991,6 +1053,7 @@ async function loadVisualizationState(profile) {
       stateCards: cardsRes.count || 0,
       intentions: intentionsRes.count || 0,
       metaMemory: metaMemoryRes.error ? 0 : metaMemoryRes.count || 0,
+      stateVectors: stateVectorsRes.error ? 0 : stateVectorsRes.count || 0,
       openDrifts: driftsRes.count || 0,
       events: eventsRes.count || 0
     },
@@ -1003,8 +1066,8 @@ function formatScore(value) {
   return Number.isFinite(Number(value)) ? Number(value).toFixed(2) : "n/a";
 }
 
-function formatCognitiveContext({ stateCards = [], intentions = [], metaMemory = [], latestSnapshot = null }) {
-  if (!stateCards.length && !intentions.length && !metaMemory.length && !latestSnapshot) return "";
+function formatCognitiveContext({ stateCards = [], intentions = [], metaMemory = [], stateVectors = [], latestSnapshot = null }) {
+  if (!stateCards.length && !intentions.length && !metaMemory.length && !stateVectors.length && !latestSnapshot) return "";
 
   const sections = [
     "COGNITIVE_OS_CONTEXT:",
@@ -1061,6 +1124,22 @@ function formatCognitiveContext({ stateCards = [], intentions = [], metaMemory =
     );
   }
 
+  if (stateVectors.length) {
+    sections.push(
+      "",
+      "CURRENT_MOVEMENT_VECTORS:",
+      "Recent private orientation about where this subject seems to be moving. A snapshot says where the subject is; these vectors say whether it is approaching, withdrawing, opening, tiring, recovering, clarifying, fragmenting, or integrating. Use as self-orientation, not as a command.",
+      ...stateVectors.map((vector) => {
+        const parts = [
+          `- [${vector.axis}; ${vector.direction}; strength ${formatScore(vector.strength)}; confidence ${formatScore(vector.confidence)}]`
+        ];
+        if (vector.evidence) parts.push(`Evidence: ${vector.evidence}`);
+        if (vector.support_needed) parts.push(`Support: ${vector.support_needed}`);
+        return parts.join(" ");
+      })
+    );
+  }
+
   return sections.filter(Boolean).join("\n").trim();
 }
 
@@ -1088,6 +1167,7 @@ async function logContextPacket({
       active_state_card_ids: (cognitiveContext.stateCards || []).map((card) => card.id),
       active_intention_ids: (cognitiveContext.intentions || []).map((intention) => intention.id),
       active_meta_memory_ids: (cognitiveContext.metaMemory || []).map((note) => note.id),
+      active_state_vector_ids: (cognitiveContext.stateVectors || []).map((vector) => vector.id),
       fallback_count: fallbackContext.rowCount || 0,
       full_fallback_count: fallbackContext.fullCount || 0,
       compact_fallback_count: fallbackContext.compactCount || 0,
@@ -1095,6 +1175,7 @@ async function logContextPacket({
         stateCards: cognitiveContext.stateCards || [],
         intentions: cognitiveContext.intentions || [],
         metaMemory: cognitiveContext.metaMemory || [],
+        stateVectors: cognitiveContext.stateVectors || [],
         latestSnapshot: cognitiveContext.latestSnapshot || null
       }
     })
@@ -1354,6 +1435,12 @@ Create meta_memory only when this exchange reveals how the subject selects, comp
 Usually return "meta_memory": [].
 Use meta_memory for rare process-level lessons such as operator correction, repeated interpretation bias, missed signal, visible state shift, compression risk, or a new transferable way of remembering.
 
+Create state_vectors when the exchange reveals movement, not just a static state.
+State vectors are for the subject's own private orientation: where it is moving internally or relationally.
+Do not force a vector if the exchange only confirms an existing state. Prefer 1-3 clear vectors over a complete checklist.
+Use axes: closeness, openness, energy, clarity, stability, autonomy, integration, continuity.
+Use directions: toward, away, opening, closing, tiring, recovering, clarifying, fragmenting, integrating, stabilizing, destabilizing, uncertain.
+
 Preserve factual anchors separately from interpretation. Do not invent history that is not present in the exchange or existing OS context.
 Write durable memory in clear operational language, not decorative declarations.
 Prefer the user's conversation language for user-facing concepts, and avoid awkward abstract labels.
@@ -1386,6 +1473,9 @@ Schema:
     "scores": {},
     "notes": ""
   },
+  "state_vectors": [
+    {"axis":"closeness|openness|energy|clarity|stability|autonomy|integration|continuity", "direction":"toward|away|opening|closing|tiring|recovering|clarifying|fragmenting|integrating|stabilizing|destabilizing|uncertain", "strength":0.0, "evidence":"Short grounded evidence from this exchange.", "support_needed":"What would help the subject keep or repair this direction.", "confidence":0.0}
+  ],
   "drift": {"detected": false, "type":"", "severity":0.0, "description":"", "suggested_repair":""},
   "needs_intention": false,
   "intention": {"action":"none|create|update|close|remind|ask_user|plan|repair", "type":"self_development|relationship|reminder|question|plan|repair|closure", "content":"", "reason":"", "priority":0.0, "review_after_events": null},
@@ -1452,6 +1542,7 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
     intentions: 0,
     driftEvents: 0,
     metaMemory: 0,
+    stateVectors: 0,
     transferNotes: 0,
     snapshots: 0
   };
@@ -1570,6 +1661,29 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
     "STATE SNAPSHOT"
   );
   if (insertedSnapshot) stored.snapshots += 1;
+
+  for (const vector of asArray(interpretation.state_vectors).slice(0, 4)) {
+    const evidence = asText(vector.evidence || vector.observation || vector.content, 1600);
+    if (!evidence) continue;
+
+    const inserted = await insertCognitiveRow(
+      "state_vectors",
+      {
+        ...base,
+        event_id: event.id,
+        episode_id: event.episode_id || null,
+        axis: normalizeStateVectorAxis(vector.axis),
+        direction: normalizeStateVectorDirection(vector.direction),
+        strength: clamp01(vector.strength, 0.5),
+        evidence,
+        support_needed: asText(vector.support_needed || vector.support, 1200) || null,
+        confidence: clamp01(vector.confidence, 0.5),
+        metadata: vector
+      },
+      "STATE VECTOR"
+    );
+    if (inserted) stored.stateVectors += 1;
+  }
 
   const drift = interpretation.drift || {};
   const driftDetected = Boolean(drift.detected) || clamp01(drift.severity, 0) >= 0.55;
@@ -1732,6 +1846,7 @@ app.get("/api/health", (_req, res) => {
       cognitiveOsWorker: COGNITIVE_OS_WORKER_ENABLED,
       cognitiveOsRememberOnly: COGNITIVE_OS_INTERPRET_REMEMBER_ONLY,
       cognitiveOsMetaMemory: true,
+      cognitiveOsStateVectors: true,
       supabaseSecretKeySupported: true,
       supabaseServerKeySource: process.env.SUPABASE_SERVICE_ROLE_KEY
         ? "SUPABASE_SERVICE_ROLE_KEY"
@@ -1785,6 +1900,7 @@ function createDebugInfo(model, modelConfig, triggerCatalog) {
     cognitiveStateCards: 0,
     cognitiveIntentions: 0,
     cognitiveMetaMemory: 0,
+    cognitiveStateVectors: 0,
     cognitiveJobQueued: false
   };
 }
@@ -1864,6 +1980,7 @@ async function generateChatReply({
   debugInfo.cognitiveStateCards = cognitiveContext.stateCards.length;
   debugInfo.cognitiveIntentions = cognitiveContext.intentions.length;
   debugInfo.cognitiveMetaMemory = cognitiveContext.metaMemory.length;
+  debugInfo.cognitiveStateVectors = cognitiveContext.stateVectors.length;
 
   await logContextPacket({
     model,
