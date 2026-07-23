@@ -1,3 +1,8 @@
 .env
 *.log
 node_modules/
+.gradle/
+build/
+android-overlay/.gradle/
+android-overlay/build/
+android-overlay/app/build/
