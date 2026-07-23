@@ -207,6 +207,8 @@ const TELEGRAM_GROUP_FALLBACK_LIMIT = Number(process.env.TELEGRAM_GROUP_FALLBACK
 const TELEGRAM_REACTIONS_ENABLED = process.env.TELEGRAM_REACTIONS_ENABLED !== "false";
 const TELEGRAM_REACTION_COOLDOWN_MS = Number(process.env.TELEGRAM_REACTION_COOLDOWN_MS || 45000);
 const TELEGRAM_MESSAGE_CHUNK_SIZE = Number(process.env.TELEGRAM_MESSAGE_CHUNK_SIZE || 3200);
+const TELEGRAM_API_RETRY_ATTEMPTS = Number(process.env.TELEGRAM_API_RETRY_ATTEMPTS || 3);
+const TELEGRAM_API_RETRY_DELAY_MS = Number(process.env.TELEGRAM_API_RETRY_DELAY_MS || 600);
 const telegramReactionLastUsed = new Map();
 
 const STATIC_TRIGGERS = [
@@ -2356,25 +2358,50 @@ function addressedToBot(message, botConfig) {
   return false;
 }
 
-async function telegramApiResult(botConfig, method, body) {
-  const response = await fetch(`https://api.telegram.org/bot${botConfig.token}/${method}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok || data.ok === false) {
-    const error = data.description || JSON.stringify(data);
-    console.log("[TELEGRAM API ERROR]", {
-      bot: botConfig.key,
-      method,
-      status: response.status,
-      error
-    });
-    return { ok: false, error, result: null };
+async function telegramApiResult(botConfig, method, body) {
+  const attempts = Math.max(1, TELEGRAM_API_RETRY_ATTEMPTS);
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${botConfig.token}/${method}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.ok === false) {
+        const error = data.description || JSON.stringify(data);
+        console.log("[TELEGRAM API ERROR]", {
+          bot: botConfig.key,
+          method,
+          status: response.status,
+          error
+        });
+        return { ok: false, error, result: null };
+      }
+      return { ok: true, error: null, result: data.result };
+    } catch (err) {
+      lastError = err;
+      console.log("[TELEGRAM API ERROR]", {
+        bot: botConfig.key,
+        method,
+        attempt,
+        error: err.message
+      });
+
+      if (attempt < attempts) {
+        await wait(TELEGRAM_API_RETRY_DELAY_MS * attempt);
+      }
+    }
   }
-  return { ok: true, error: null, result: data.result };
+
+  return { ok: false, error: lastError?.message || "Telegram fetch failed", result: null };
 }
 
 async function telegramApi(botConfig, method, body) {
