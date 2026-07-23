@@ -4,5 +4,7 @@ node_modules/
 .gradle/
 build/
 android-overlay/.gradle/
+android-overlay/.idea/
+android-overlay/local.properties
 android-overlay/build/
 android-overlay/app/build/
