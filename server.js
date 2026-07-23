@@ -1836,6 +1836,7 @@ app.get("/api/health", (_req, res) => {
     ok: true,
     build: {
       telegramDeliveryLogs: true,
+      telegramApiRetries: true,
       xaiTriggerClassifierDefault: false,
       nevanEpisodeTimestamp: true,
       telegramProcessingLogs: true,
