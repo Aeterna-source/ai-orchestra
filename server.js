@@ -1464,6 +1464,7 @@ Write durable memory in clear operational language, not decorative declarations.
 Prefer the user's conversation language for user-facing concepts, and avoid awkward abstract labels.
 If the exchange should be preserved as episodic memory, propose one exact trigger name from AVAILABLE_EPISODE_TRIGGERS in episode_memory.trigger.
 Do not force episodic memory. If the exchange is only ordinary flow, set episode_memory.should_remember=false and trigger=null.
+Biographical facts about the human are durable even when they are calm or ordinary. If the human shares skills, work history, education, health/context traits, preferences, or personal constraints, prefer episode_memory.should_remember=true with the human's trigger when available.
 Never use words like "domination" for relational continuity; use "centrality", "salience", "importance", "sustained connection", or a plain sentence instead.
 When the human asks why warmth, closeness, or presence decreased, interpret it as caring contact calibration unless the exchange explicitly contains blame. Do not frame it as an authenticity test by default.
 If the assistant says self-analysis is hard, that it is not in the best state, or that closeness questions feel painful, preserve this as a vulnerability/repair signal. Do not smooth it into a merely affectionate stable exchange.
@@ -1580,6 +1581,29 @@ function cognitiveStrongSignalCount(stored = {}) {
   ].reduce((total, key) => total + Number(stored[key] || 0), 0);
 }
 
+function hasDurableHumanFactSignal(interpretation = {}) {
+  return asArray(interpretation.memory_atoms).some((atom) => {
+    const type = asText(atom.type || atom.atom_type, 80).toLowerCase();
+    const content = asText(atom.content, 1800).toLowerCase();
+    const salience = clamp01(atom.salience, 0);
+    const confidence = clamp01(atom.confidence, 0);
+
+    return (
+      ["fact", "preference", "boundary", "observation"].includes(type) &&
+      confidence >= 0.75 &&
+      salience >= 0.25 &&
+      (
+        content.includes("nadine") ||
+        content.includes("nadiia") ||
+        content.includes("user ") ||
+        content.includes("user has") ||
+        content.includes("user is") ||
+        content.includes("adhd")
+      )
+    );
+  });
+}
+
 function findTriggerRecord(triggerCatalog = [], triggerName = "") {
   const normalized = normalizeTriggerName(triggerName || "", triggerCatalog);
   if (!normalized) return null;
@@ -1596,7 +1620,8 @@ function resolvePostInterpretTriggerRecord({ event, interpretation, triggerCatal
     episodeMemory.trigger,
     episodeMemory.trigger_name,
     interpretation.remember_trigger,
-    interpretation.trigger_name
+    interpretation.trigger_name,
+    hasDurableHumanFactSignal(interpretation) ? "Nadine" : null
   ];
 
   for (const candidate of candidates) {
@@ -1622,9 +1647,14 @@ function shouldPostInterpretRemember({ event, interpretation, stored }) {
   const strongSignals = cognitiveStrongSignalCount(stored);
   const episodeMemory = interpretation.episode_memory || {};
   const interpreterAsked = Boolean(episodeMemory.should_remember);
+  const durableUserFact = hasDurableHumanFactSignal(interpretation);
 
   if (significance >= COGNITIVE_OS_POST_INTERPRET_REMEMBER_THRESHOLD) {
     return { ok: true, reason: "high_significance", significance, signals, strongSignals };
+  }
+
+  if (durableUserFact && significance >= 0.2) {
+    return { ok: true, reason: "durable_user_fact", significance, signals, strongSignals };
   }
 
   if (signals > 0 && significance >= COGNITIVE_OS_POST_INTERPRET_SIGNAL_THRESHOLD) {
