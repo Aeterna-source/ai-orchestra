@@ -968,9 +968,12 @@ async function loadVisualizationState(profile) {
       .eq("profile", profile)
   ]);
 
-  const error = snapshotsRes.error || cardsRes.error || intentionsRes.error || metaMemoryRes.error || driftsRes.error || eventsRes.error;
+  const error = snapshotsRes.error || cardsRes.error || intentionsRes.error || driftsRes.error || eventsRes.error;
   if (error) {
     throw new Error(formatSupabaseError(error));
+  }
+  if (metaMemoryRes.error) {
+    console.log("[VISUALIZATION META MEMORY COUNT ERROR]", formatSupabaseError(metaMemoryRes.error));
   }
 
   const valence = {};
@@ -987,7 +990,7 @@ async function loadVisualizationState(profile) {
     counts: {
       stateCards: cardsRes.count || 0,
       intentions: intentionsRes.count || 0,
-      metaMemory: metaMemoryRes.count || 0,
+      metaMemory: metaMemoryRes.error ? 0 : metaMemoryRes.count || 0,
       openDrifts: driftsRes.count || 0,
       events: eventsRes.count || 0
     },
