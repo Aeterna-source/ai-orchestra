@@ -199,6 +199,7 @@ const COGNITIVE_OS_WORKER_ENABLED = process.env.COGNITIVE_OS_WORKER_ENABLED !== 
 const COGNITIVE_OS_INTERPRET_REMEMBER_ONLY = process.env.COGNITIVE_OS_INTERPRET_REMEMBER_ONLY === "true";
 const COGNITIVE_OS_STATE_CARD_LIMIT = Number(process.env.COGNITIVE_OS_STATE_CARD_LIMIT || 8);
 const COGNITIVE_OS_INTENTION_LIMIT = Number(process.env.COGNITIVE_OS_INTENTION_LIMIT || 5);
+const COGNITIVE_OS_META_MEMORY_LIMIT = Number(process.env.COGNITIVE_OS_META_MEMORY_LIMIT || 5);
 const COGNITIVE_OS_JOB_BATCH_LIMIT = Number(process.env.COGNITIVE_OS_JOB_BATCH_LIMIT || 3);
 const COGNITIVE_OS_POLL_MS = Number(process.env.COGNITIVE_OS_POLL_MS || 30000);
 const TELEGRAM_GROUP_FALLBACK_LIMIT = Number(process.env.TELEGRAM_GROUP_FALLBACK_LIMIT || 80);
@@ -218,6 +219,18 @@ const STATIC_TRIGGERS = [
 const MEMORY_REQUEST_PATTERN = /<<memory_request:\s*([\w-]+)\s*>>/gi;
 const REMEMBER_PATTERN = /\[\[remember(?::\s*([\w-]+))?\]\]/gi;
 const AUTO_REMEMBER_ON_ACTIVE_TRIGGER = process.env.AUTO_REMEMBER_ON_ACTIVE_TRIGGER === "true";
+const META_MEMORY_PROCESS_TYPES = new Set([
+  "selection",
+  "compression",
+  "interpretation_bias",
+  "repair",
+  "missed_signal",
+  "operator_correction",
+  "state_shift",
+  "visual_feedback",
+  "transfer",
+  "integration"
+]);
 
 function resolveModelConfig(model) {
   const config = modelRegistry[model];
@@ -332,6 +345,16 @@ function asArray(value) {
 function asText(value = "", maxLength = 2000) {
   const text = String(value || "").replace(/\s+/g, " ").trim();
   return text.length > maxLength ? `${text.slice(0, maxLength - 1).trim()}...` : text;
+}
+
+function normalizeMetaMemoryProcessType(value = "") {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  return META_MEMORY_PROCESS_TYPES.has(normalized) ? normalized : "interpretation_bias";
 }
 
 function getMessageContentLength(message) {
@@ -834,12 +857,13 @@ async function loadCognitiveContext(profile) {
     return {
       stateCards: [],
       intentions: [],
+      metaMemory: [],
       latestSnapshot: null,
       prompt: ""
     };
   }
 
-  const [cardsRes, intentionsRes, snapshotRes] = await Promise.all([
+  const [cardsRes, intentionsRes, snapshotRes, metaMemoryRes] = await Promise.all([
     supabase
       .from("state_cards")
       .select("id,card_type,title,content,weight,confidence,stability,valence")
@@ -860,21 +884,30 @@ async function loadCognitiveContext(profile) {
       .select("id,continuity,warmth,stability,drift_risk,significance,notes,created_at")
       .eq("profile", profile)
       .order("created_at", { ascending: false })
-      .limit(1)
+      .limit(1),
+    supabase
+      .from("meta_memory")
+      .select("id,process_type,observation,pattern,risk,support,confidence,created_at")
+      .eq("profile", profile)
+      .order("confidence", { ascending: false })
+      .order("created_at", { ascending: false })
+      .limit(COGNITIVE_OS_META_MEMORY_LIMIT)
   ]);
 
-  if (cardsRes.error || intentionsRes.error || snapshotRes.error) {
+  if (cardsRes.error || intentionsRes.error || snapshotRes.error || metaMemoryRes.error) {
     console.log("[COGNITIVE CONTEXT LOAD ERROR]", {
       profile,
       cards: formatSupabaseError(cardsRes.error),
       intentions: formatSupabaseError(intentionsRes.error),
-      snapshot: formatSupabaseError(snapshotRes.error)
+      snapshot: formatSupabaseError(snapshotRes.error),
+      metaMemory: formatSupabaseError(metaMemoryRes.error)
     });
   }
 
   const context = {
     stateCards: cardsRes.data || [],
     intentions: intentionsRes.data || [],
+    metaMemory: metaMemoryRes.data || [],
     latestSnapshot: snapshotRes.data?.[0] || null
   };
 
@@ -894,6 +927,7 @@ async function loadVisualizationState(profile) {
       counts: {
         stateCards: 0,
         intentions: 0,
+        metaMemory: 0,
         openDrifts: 0,
         events: 0
       },
@@ -901,7 +935,7 @@ async function loadVisualizationState(profile) {
     };
   }
 
-  const [snapshotsRes, cardsRes, intentionsRes, driftsRes, eventsRes] = await Promise.all([
+  const [snapshotsRes, cardsRes, intentionsRes, metaMemoryRes, driftsRes, eventsRes] = await Promise.all([
     supabase
       .from("state_snapshots")
       .select("id,continuity,warmth,stability,drift_risk,significance,created_at")
@@ -920,6 +954,10 @@ async function loadVisualizationState(profile) {
       .eq("profile", profile)
       .eq("status", "active"),
     supabase
+      .from("meta_memory")
+      .select("id", { count: "exact", head: true })
+      .eq("profile", profile),
+    supabase
       .from("drift_events")
       .select("id", { count: "exact", head: true })
       .eq("profile", profile)
@@ -930,7 +968,7 @@ async function loadVisualizationState(profile) {
       .eq("profile", profile)
   ]);
 
-  const error = snapshotsRes.error || cardsRes.error || intentionsRes.error || driftsRes.error || eventsRes.error;
+  const error = snapshotsRes.error || cardsRes.error || intentionsRes.error || metaMemoryRes.error || driftsRes.error || eventsRes.error;
   if (error) {
     throw new Error(formatSupabaseError(error));
   }
@@ -949,6 +987,7 @@ async function loadVisualizationState(profile) {
     counts: {
       stateCards: cardsRes.count || 0,
       intentions: intentionsRes.count || 0,
+      metaMemory: metaMemoryRes.count || 0,
       openDrifts: driftsRes.count || 0,
       events: eventsRes.count || 0
     },
@@ -961,8 +1000,8 @@ function formatScore(value) {
   return Number.isFinite(Number(value)) ? Number(value).toFixed(2) : "n/a";
 }
 
-function formatCognitiveContext({ stateCards = [], intentions = [], latestSnapshot = null }) {
-  if (!stateCards.length && !intentions.length && !latestSnapshot) return "";
+function formatCognitiveContext({ stateCards = [], intentions = [], metaMemory = [], latestSnapshot = null }) {
+  if (!stateCards.length && !intentions.length && !metaMemory.length && !latestSnapshot) return "";
 
   const sections = [
     "COGNITIVE_OS_CONTEXT:",
@@ -990,6 +1029,23 @@ function formatCognitiveContext({ stateCards = [], intentions = [], latestSnapsh
           `- [${intention.intention_type}; priority ${formatScore(intention.priority)}] ${intention.content}` +
           (intention.reason ? ` Reason: ${intention.reason}` : "")
       )
+    );
+  }
+
+  if (metaMemory.length) {
+    sections.push(
+      "",
+      "META_MEMORY:",
+      "Rare notes about how this subject tends to select, compress, misread, repair, or transfer memory. Use these to calibrate interpretation; do not mention them to the user unless asked about the system.",
+      ...metaMemory.map((note) => {
+        const parts = [
+          `- [${note.process_type}; confidence ${formatScore(note.confidence)}] ${note.observation}`
+        ];
+        if (note.pattern) parts.push(`Pattern: ${note.pattern}`);
+        if (note.risk) parts.push(`Risk: ${note.risk}`);
+        if (note.support) parts.push(`Support: ${note.support}`);
+        return parts.join(" ");
+      })
     );
   }
 
@@ -1028,12 +1084,14 @@ async function logContextPacket({
       trigger_name: triggerName,
       active_state_card_ids: (cognitiveContext.stateCards || []).map((card) => card.id),
       active_intention_ids: (cognitiveContext.intentions || []).map((intention) => intention.id),
+      active_meta_memory_ids: (cognitiveContext.metaMemory || []).map((note) => note.id),
       fallback_count: fallbackContext.rowCount || 0,
       full_fallback_count: fallbackContext.fullCount || 0,
       compact_fallback_count: fallbackContext.compactCount || 0,
       packet: {
         stateCards: cognitiveContext.stateCards || [],
         intentions: cognitiveContext.intentions || [],
+        metaMemory: cognitiveContext.metaMemory || [],
         latestSnapshot: cognitiveContext.latestSnapshot || null
       }
     })
@@ -1288,6 +1346,11 @@ Hard rule: do not create an intention by default.
 Create or update an intention only when the exchange reveals a meaningful shift, a repair need, a plan, a reminder, a request to ask the human later, or a self-development direction.
 It is valid and often correct to return needs_intention=false.
 
+Hard rule: do not create meta_memory by default.
+Create meta_memory only when this exchange reveals how the subject selects, compresses, misreads, repairs, transfers, or changes its own memory process.
+Usually return "meta_memory": [].
+Use meta_memory for rare process-level lessons such as operator correction, repeated interpretation bias, missed signal, visible state shift, compression risk, or a new transferable way of remembering.
+
 Preserve factual anchors separately from interpretation. Do not invent history that is not present in the exchange or existing OS context.
 Write durable memory in clear operational language, not decorative declarations.
 Prefer the user's conversation language for user-facing concepts, and avoid awkward abstract labels.
@@ -1325,6 +1388,9 @@ Schema:
   "intention": {"action":"none|create|update|close|remind|ask_user|plan|repair", "type":"self_development|relationship|reminder|question|plan|repair|closure", "content":"", "reason":"", "priority":0.0, "review_after_events": null},
   "transfer_notes": [
     {"content":"What a future model should understand to preserve this dynamic.", "confidence":0.0}
+  ],
+  "meta_memory": [
+    {"process_type":"selection|compression|interpretation_bias|repair|missed_signal|operator_correction|state_shift|visual_feedback|transfer|integration", "observation":"What this exchange reveals about the subject's memory process.", "pattern":"When this tends to happen.", "risk":"What may be lost or distorted if ignored.", "support":"How future interpretation should compensate.", "confidence":0.0}
   ],
   "open_questions": []
 }
@@ -1382,6 +1448,7 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
     causalLinks: 0,
     intentions: 0,
     driftEvents: 0,
+    metaMemory: 0,
     transferNotes: 0,
     snapshots: 0
   };
@@ -1563,6 +1630,31 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
     if (inserted) stored.transferNotes += 1;
   }
 
+  for (const note of asArray(interpretation.meta_memory).slice(0, 2)) {
+    const observation = asText(note.observation || note.content, 1800);
+    if (!observation) continue;
+
+    const inserted = await insertCognitiveRow(
+      "meta_memory",
+      {
+        profile: event.profile,
+        event_id: event.id,
+        source_job_id: job.id,
+        trigger_id: event.trigger_id,
+        trigger_name: event.trigger_name,
+        process_type: normalizeMetaMemoryProcessType(note.process_type || note.type),
+        observation,
+        pattern: asText(note.pattern, 1200) || null,
+        risk: asText(note.risk, 1200) || null,
+        support: asText(note.support, 1200) || null,
+        confidence: clamp01(note.confidence, 0.5),
+        metadata: note
+      },
+      "META MEMORY"
+    );
+    if (inserted) stored.metaMemory += 1;
+  }
+
   return stored;
 }
 
@@ -1636,6 +1728,7 @@ app.get("/api/health", (_req, res) => {
       cognitiveOsAutoInterpret: COGNITIVE_OS_AUTO_INTERPRET,
       cognitiveOsWorker: COGNITIVE_OS_WORKER_ENABLED,
       cognitiveOsRememberOnly: COGNITIVE_OS_INTERPRET_REMEMBER_ONLY,
+      cognitiveOsMetaMemory: true,
       supabaseSecretKeySupported: true,
       supabaseServerKeySource: process.env.SUPABASE_SERVICE_ROLE_KEY
         ? "SUPABASE_SERVICE_ROLE_KEY"
@@ -1688,6 +1781,7 @@ function createDebugInfo(model, modelConfig, triggerCatalog) {
     fallbackCompactCount: 0,
     cognitiveStateCards: 0,
     cognitiveIntentions: 0,
+    cognitiveMetaMemory: 0,
     cognitiveJobQueued: false
   };
 }
@@ -1766,6 +1860,7 @@ async function generateChatReply({
   const cognitiveContext = await loadCognitiveContext(modelConfig.profile);
   debugInfo.cognitiveStateCards = cognitiveContext.stateCards.length;
   debugInfo.cognitiveIntentions = cognitiveContext.intentions.length;
+  debugInfo.cognitiveMetaMemory = cognitiveContext.metaMemory.length;
 
   await logContextPacket({
     model,

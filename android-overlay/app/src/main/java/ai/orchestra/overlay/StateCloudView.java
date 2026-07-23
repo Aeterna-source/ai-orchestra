@@ -133,7 +133,7 @@ public final class StateCloudView extends View {
         );
         canvas.drawText(line, dp(14), height - dp(30), textPaint);
 
-        String counts = "tone " + dominantTone() + " / cards " + state.cards + " / intentions " + state.intentions + " / events " + state.events;
+        String counts = "tone " + dominantTone() + " / cards " + state.cards + " / meta " + state.metaMemory + " / events " + state.events;
         canvas.drawText(counts, dp(14), height - dp(13), textPaint);
     }
 
@@ -147,9 +147,10 @@ public final class StateCloudView extends View {
         int base = state.ready ? 420 : 260;
         int cards = Math.min(20, state.cards) * 10;
         int intentions = Math.min(8, state.intentions) * 16;
+        int meta = Math.min(10, state.metaMemory) * 8;
         int events = (int) (Math.min(80, state.events) * 1.3);
         int drift = (int) Math.round(state.driftRisk * 44);
-        return Math.max(220, Math.min(MAX_PARTICLES, base + cards + intentions + events + drift));
+        return Math.max(220, Math.min(MAX_PARTICLES, base + cards + intentions + meta + events + drift));
     }
 
     private int[] chooseColor(double seed) {

@@ -17,6 +17,7 @@ const visualState = {
   counts: {
     stateCards: 0,
     intentions: 0,
+    metaMemory: 0,
     openDrifts: 0,
     events: 0
   },
@@ -117,6 +118,7 @@ function setStateMetrics() {
     ["significance", scoreLabel(visualState.significance)],
     ["cards", visualState.counts.stateCards ?? 0],
     ["intentions", visualState.counts.intentions ?? 0],
+    ["meta", visualState.counts.metaMemory ?? 0],
     ["drifts", visualState.counts.openDrifts ?? 0],
     ["events", visualState.counts.events ?? 0]
   ];
@@ -175,9 +177,10 @@ function targetParticleCount() {
   const base = visualState.ready ? 420 : 260;
   const cards = Math.min(20, counts.stateCards || 0) * 10;
   const intentions = Math.min(8, counts.intentions || 0) * 16;
+  const meta = Math.min(10, counts.metaMemory || 0) * 8;
   const events = Math.min(80, counts.events || 0) * 1.3;
   const drift = Math.round(visualState.driftRisk * 44);
-  return Math.round(Math.max(220, Math.min(860, base + cards + intentions + events + drift)));
+  return Math.round(Math.max(220, Math.min(860, base + cards + intentions + meta + events + drift)));
 }
 
 function createParticle(canvas) {

@@ -11,6 +11,7 @@ final class OverlayState {
     double significance = 0.2;
     int cards = 0;
     int intentions = 0;
+    int metaMemory = 0;
     int drifts = 0;
     int events = 0;
     int warmCards = 0;
@@ -34,6 +35,7 @@ final class OverlayState {
         if (counts != null) {
             state.cards = counts.optInt("stateCards", 0);
             state.intentions = counts.optInt("intentions", 0);
+            state.metaMemory = counts.optInt("metaMemory", 0);
             state.drifts = counts.optInt("openDrifts", 0);
             state.events = counts.optInt("events", 0);
         }
