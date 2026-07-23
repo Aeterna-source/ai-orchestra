@@ -7,101 +7,6 @@
 
     <link rel="stylesheet" href="style.css">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-
-    <style>
-        body {
-            background: #111;
-            margin: 0;
-            font-family: Arial, sans-serif;
-        }
-
-        h1 {
-            color: #fff;
-            text-align: center;
-            padding: 20px;
-            margin: 0;
-        }
-
-        #controls {
-            text-align: center;
-            margin: 10px 0 12px;
-            padding: 0 12px;
-        }
-
-        #controls label {
-            color: white;
-            margin-right: 10px;
-        }
-
-        #controls select {
-            padding: 10px 12px;
-            border-radius: 8px;
-            border: none;
-            min-height: 44px;
-            font-size: 16px;
-            max-width: 100%;
-        }
-
-        #chat {
-            width: 90%;
-            height: 70vh;
-            margin: 0 auto;
-            background: #222;
-            border-radius: 10px;
-            padding: 15px;
-            overflow-y: auto;
-            color: white;
-            box-sizing: border-box;
-        }
-
-        #msgBox {
-            width: 90%;
-            margin: 10px auto 16px;
-            display: flex;
-            gap: 10px;
-            box-sizing: border-box;
-        }
-
-        #msg {
-            flex: 1;
-            padding: 12px 12px;
-            border-radius: 8px;
-            border: none;
-            min-height: 44px;
-            font-size: 16px;
-            box-sizing: border-box;
-        }
-
-        #sendBtn {
-            width: 56px;
-            min-height: 44px;
-            border: none;
-            background: #3b82f6;
-            color: white;
-            border-radius: 8px;
-            cursor: pointer;
-            font-size: 16px;
-        }
-
-        .user {
-            color: #4fc3f7;
-            margin: 10px 0;
-            white-space: pre-wrap;
-        }
-
-        .bot {
-            color: #90ee90;
-            margin: 10px 0;
-            white-space: pre-wrap;
-        }
-
-        @media (max-width: 480px) {
-            h1 { font-size: 22px; padding: 14px; }
-            #chat { height: 65vh; padding: 12px; width: 92%; }
-            #msgBox { width: 92%; margin-bottom: 14px; }
-            #controls { margin-top: 8px; }
-        }
-    </style>
 </head>
 
 <body>
@@ -118,6 +23,18 @@
         </select>
     </div>
 
+    <section id="statePanel" aria-label="Візуалізація стану системи">
+        <div class="state-panel-header">
+            <div>
+                <span class="state-kicker">state field</span>
+                <h2 id="stateTitle">System state</h2>
+            </div>
+            <span id="stateUpdated">syncing...</span>
+        </div>
+        <canvas id="stateCloud"></canvas>
+        <div id="stateMetrics"></div>
+    </section>
+
     <div id="chat"></div>
 
     <div id="msgBox">
@@ -128,7 +45,7 @@
             onkeydown="if(event.key==='Enter') sendMsg()"
             autocomplete="off"
         >
-        <button id="sendBtn" onclick="sendMsg()">▶</button>
+        <button id="sendBtn" onclick="sendMsg()" aria-label="Надіслати">▶</button>
     </div>
 
     <script src="script.js"></script>

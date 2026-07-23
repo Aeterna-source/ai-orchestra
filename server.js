@@ -811,6 +811,24 @@ function findModelKeyForProfile(profile) {
   return entry?.[0] || null;
 }
 
+function resolveProfileKey(value = "") {
+  if (modelRegistry[value]) return modelRegistry[value].profile;
+  if (memoryTables[value]) return value;
+
+  const normalized = String(value).toLowerCase();
+  const profile = Object.keys(memoryTables).find((name) => name.toLowerCase() === normalized);
+  if (profile) return profile;
+
+  const modelEntry = Object.entries(modelRegistry).find(
+    ([key, config]) =>
+      key.toLowerCase() === normalized ||
+      config.profile.toLowerCase() === normalized ||
+      config.upstreamModel.toLowerCase() === normalized
+  );
+
+  return modelEntry?.[1]?.profile || null;
+}
+
 async function loadCognitiveContext(profile) {
   if (!COGNITIVE_OS_ENABLED || !COGNITIVE_OS_CONTEXT_ENABLED) {
     return {
@@ -863,6 +881,79 @@ async function loadCognitiveContext(profile) {
   return {
     ...context,
     prompt: formatCognitiveContext(context)
+  };
+}
+
+async function loadVisualizationState(profile) {
+  if (!COGNITIVE_OS_ENABLED) {
+    return {
+      profile,
+      enabled: false,
+      latestSnapshot: null,
+      trend: [],
+      counts: {
+        stateCards: 0,
+        intentions: 0,
+        openDrifts: 0,
+        events: 0
+      },
+      valence: {}
+    };
+  }
+
+  const [snapshotsRes, cardsRes, intentionsRes, driftsRes, eventsRes] = await Promise.all([
+    supabase
+      .from("state_snapshots")
+      .select("id,continuity,warmth,stability,drift_risk,significance,created_at")
+      .eq("profile", profile)
+      .order("created_at", { ascending: false })
+      .limit(8),
+    supabase
+      .from("state_cards")
+      .select("id,valence,card_type", { count: "exact" })
+      .eq("profile", profile)
+      .eq("status", "active")
+      .limit(200),
+    supabase
+      .from("intentions")
+      .select("id", { count: "exact", head: true })
+      .eq("profile", profile)
+      .eq("status", "active"),
+    supabase
+      .from("drift_events")
+      .select("id", { count: "exact", head: true })
+      .eq("profile", profile)
+      .eq("status", "open"),
+    supabase
+      .from("os_events")
+      .select("id", { count: "exact", head: true })
+      .eq("profile", profile)
+  ]);
+
+  const error = snapshotsRes.error || cardsRes.error || intentionsRes.error || driftsRes.error || eventsRes.error;
+  if (error) {
+    throw new Error(formatSupabaseError(error));
+  }
+
+  const valence = {};
+  for (const card of cardsRes.data || []) {
+    const key = card.valence || "neutral";
+    valence[key] = (valence[key] || 0) + 1;
+  }
+
+  return {
+    profile,
+    enabled: true,
+    latestSnapshot: snapshotsRes.data?.[0] || null,
+    trend: [...(snapshotsRes.data || [])].reverse(),
+    counts: {
+      stateCards: cardsRes.count || 0,
+      intentions: intentionsRes.count || 0,
+      openDrifts: driftsRes.count || 0,
+      events: eventsRes.count || 0
+    },
+    valence,
+    updatedAt: new Date().toISOString()
   };
 }
 
@@ -1894,6 +1985,21 @@ app.get("/api/cognitive/context/:profile", async (req, res) => {
 
   const context = await loadCognitiveContext(profile);
   res.json(context);
+});
+
+app.get("/api/visualization/:model", async (req, res) => {
+  try {
+    const profile = resolveProfileKey(req.params.model);
+    if (!profile || !memoryTables[profile]) {
+      return res.status(404).json({ error: "Unknown profile" });
+    }
+
+    const state = await loadVisualizationState(profile);
+    res.json(state);
+  } catch (err) {
+    console.error("[VISUALIZATION STATE ERROR]", err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 function getTelegramMessage(update) {
