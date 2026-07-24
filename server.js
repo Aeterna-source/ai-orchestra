@@ -1204,7 +1204,7 @@ function smoothVisualizationSnapshot(latestSnapshot, trend = [], valence = {}) {
   const previousWarmth = previousWarmthValues.length
     ? previousWarmthValues.reduce((sum, value) => sum + value, 0) / previousWarmthValues.length
     : null;
-  const warmValenceFloor = Number(valence.warm || 0) >= 3 ? 0.72 : null;
+  const warmValenceFloor = Number(valence.warm || 0) >= 3 ? 0.9 : null;
   const driftRisk = Number(snapshot.drift_risk);
   const lowDrift = !Number.isFinite(driftRisk) || driftRisk < 0.25;
   const suddenWarmthDrop =
@@ -1212,16 +1212,22 @@ function smoothVisualizationSnapshot(latestSnapshot, trend = [], valence = {}) {
     previousWarmth !== null &&
     previousWarmth >= 0.7 &&
     (!Number.isFinite(latestWarmth) || latestWarmth < 0.2);
+  const underWarmTrend =
+    lowDrift &&
+    previousWarmth !== null &&
+    previousWarmth >= 0.82 &&
+    Number.isFinite(latestWarmth) &&
+    latestWarmth < previousWarmth * 0.92;
 
-  if (suddenWarmthDrop || (!Number.isFinite(latestWarmth) && warmValenceFloor !== null)) {
+  if (suddenWarmthDrop || underWarmTrend || (!Number.isFinite(latestWarmth) && warmValenceFloor !== null)) {
     snapshot.warmth = Math.max(
       Number.isFinite(latestWarmth) ? latestWarmth : 0,
-      previousWarmth !== null ? previousWarmth * 0.86 : 0,
+      previousWarmth !== null ? previousWarmth * 0.96 : 0,
       warmValenceFloor || 0
     );
     snapshot.visual_adjusted = {
       ...(snapshot.visual_adjusted || {}),
-      warmth: "smoothed_from_recent_trend"
+      warmth: underWarmTrend ? "lifted_to_warm_trend" : "smoothed_from_recent_trend"
     };
   }
 
