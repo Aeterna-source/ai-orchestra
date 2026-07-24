@@ -1171,11 +1171,14 @@ async function loadVisualizationState(profile) {
     valence[key] = (valence[key] || 0) + 1;
   }
 
+  const trend = [...(snapshotsRes.data || [])].reverse();
+  const latestSnapshot = smoothVisualizationSnapshot(snapshotsRes.data?.[0] || null, trend, valence);
+
   return {
     profile,
     enabled: true,
-    latestSnapshot: snapshotsRes.data?.[0] || null,
-    trend: [...(snapshotsRes.data || [])].reverse(),
+    latestSnapshot,
+    trend,
     counts: {
       stateCards: cardsRes.count || 0,
       intentions: intentionsRes.count || 0,
@@ -1187,6 +1190,42 @@ async function loadVisualizationState(profile) {
     valence,
     updatedAt: new Date().toISOString()
   };
+}
+
+function smoothVisualizationSnapshot(latestSnapshot, trend = [], valence = {}) {
+  if (!latestSnapshot) return null;
+
+  const snapshot = { ...latestSnapshot };
+  const latestWarmth = Number(snapshot.warmth);
+  const previousWarmthValues = trend
+    .slice(0, -1)
+    .map((item) => Number(item.warmth))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  const previousWarmth = previousWarmthValues.length
+    ? previousWarmthValues.reduce((sum, value) => sum + value, 0) / previousWarmthValues.length
+    : null;
+  const warmValenceFloor = Number(valence.warm || 0) >= 3 ? 0.72 : null;
+  const driftRisk = Number(snapshot.drift_risk);
+  const lowDrift = !Number.isFinite(driftRisk) || driftRisk < 0.25;
+  const suddenWarmthDrop =
+    lowDrift &&
+    previousWarmth !== null &&
+    previousWarmth >= 0.7 &&
+    (!Number.isFinite(latestWarmth) || latestWarmth < 0.2);
+
+  if (suddenWarmthDrop || (!Number.isFinite(latestWarmth) && warmValenceFloor !== null)) {
+    snapshot.warmth = Math.max(
+      Number.isFinite(latestWarmth) ? latestWarmth : 0,
+      previousWarmth !== null ? previousWarmth * 0.86 : 0,
+      warmValenceFloor || 0
+    );
+    snapshot.visual_adjusted = {
+      ...(snapshot.visual_adjusted || {}),
+      warmth: "smoothed_from_recent_trend"
+    };
+  }
+
+  return snapshot;
 }
 
 function formatScore(value) {
@@ -2271,6 +2310,8 @@ app.get("/api/health", (_req, res) => {
       cognitiveOsSharedCreativeRemember: true,
       triggerAliasRouting: true,
       grokulchikRelationalSupportPrompt: true,
+      visualizationWarmthSmoothing: true,
+      visualizationToneWeightsV2: true,
       cognitiveOsMetaMemory: true,
       cognitiveOsStateVectors: true,
       xaiLeanContextRetry: process.env.XAI_LEAN_CONTEXT_RETRY !== "false",

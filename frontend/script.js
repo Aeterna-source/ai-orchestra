@@ -223,10 +223,12 @@ function resizeCanvas(canvas) {
 function toneScores() {
   const counts = visualState.counts || {};
   const drift = Math.min(1, visualState.driftRisk * 1.25 + (counts.openDrifts || 0) * 0.08);
-  const warmth = visualState.warmth * (1 - visualState.driftRisk * 0.25);
+  const warmCardSignal = Math.min(1, (visualState.valence?.warm || 0) * 0.08);
+  const warmth = Math.min(1, visualState.warmth * 0.82 + warmCardSignal * 0.18) * (1 - visualState.driftRisk * 0.18);
   const inspiration = Math.min(1, visualState.significance * 0.72 + (counts.intentions || 0) * 0.08);
-  const focus = Math.min(1, visualState.stability * 0.56 + visualState.continuity * 0.34);
-  const tenderness = Math.min(1, visualState.warmth * 0.58 + (visualState.valence?.warm || 0) * 0.045);
+  const focusBase = Math.min(1, visualState.stability * 0.34 + visualState.continuity * 0.22);
+  const focus = focusBase * (1 - Math.max(0, warmth - 0.55) * 0.75);
+  const tenderness = Math.min(1, visualState.warmth * 0.78 + warmCardSignal * 0.22);
   return [drift, warmth, inspiration, focus, tenderness];
 }
 

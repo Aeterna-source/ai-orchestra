@@ -213,10 +213,12 @@ public final class StateCloudView extends View {
 
     private double[] toneScores() {
         double drift = Math.min(1, state.driftRisk * 1.25 + state.drifts * 0.08);
-        double warmth = state.warmth * (1 - state.driftRisk * 0.25);
+        double warmCardSignal = Math.min(1, state.warmCards * 0.08);
+        double warmth = Math.min(1, state.warmth * 0.82 + warmCardSignal * 0.18) * (1 - state.driftRisk * 0.18);
         double inspiration = Math.min(1, state.significance * 0.72 + state.intentions * 0.08);
-        double focus = Math.min(1, state.stability * 0.56 + state.continuity * 0.34);
-        double tenderness = Math.min(1, state.warmth * 0.58 + state.warmCards * 0.045);
+        double focusBase = Math.min(1, state.stability * 0.34 + state.continuity * 0.22);
+        double focus = focusBase * (1 - Math.max(0, warmth - 0.55) * 0.75);
+        double tenderness = Math.min(1, state.warmth * 0.78 + warmCardSignal * 0.22);
         return new double[]{drift, warmth, inspiration, focus, tenderness};
     }
 
