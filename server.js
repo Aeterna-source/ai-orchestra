@@ -452,6 +452,26 @@ function buildProviderHeaders({ providerName, model, profile, purpose }) {
   return headers;
 }
 
+function parseProviderResponse(rawText = "") {
+  if (!rawText) return {};
+
+  try {
+    return JSON.parse(rawText);
+  } catch {
+    return { raw: rawText };
+  }
+}
+
+function createProviderError({ providerName, model, status, data, rawText }) {
+  const error = new Error(`${providerName} call failed`);
+  error.providerName = providerName;
+  error.model = model;
+  error.status = status;
+  error.providerError = data?.error || data;
+  error.rawText = rawText;
+  return error;
+}
+
 async function logAiCall({
   providerName,
   model,
@@ -516,8 +536,11 @@ async function callChatCompletion({
     body: JSON.stringify({ model, messages, ...extraBody })
   });
 
-  const data = await response.json().catch(() => ({}));
+  const rawText = await response.text().catch(() => "");
+  const data = parseProviderResponse(rawText);
   if (!response.ok) {
+    const errorText = JSON.stringify(data?.error || data || {}).slice(0, 1000);
+    const rawErrorText = rawText ? rawText.slice(0, 1000) : "";
     await logAiCall({
       providerName,
       model,
@@ -525,7 +548,7 @@ async function callChatCompletion({
       purpose,
       ok: false,
       status: response.status,
-      error: JSON.stringify(data?.error || data).slice(0, 1000),
+      error: errorText && errorText !== "{}" ? errorText : rawErrorText || `HTTP ${response.status}`,
       usage: data?.usage,
       messages
     });
@@ -533,9 +556,16 @@ async function callChatCompletion({
       provider: providerName,
       model,
       status: response.status,
-      error: data?.error || data
+      error: data?.error || data,
+      rawText: rawErrorText
     });
-    throw new Error(`${providerName} call failed`);
+    throw createProviderError({
+      providerName,
+      model,
+      status: response.status,
+      data,
+      rawText
+    });
   }
 
   const reply = data?.choices?.[0]?.message?.content || "";
@@ -636,6 +666,17 @@ function shouldUseReactionClassifier(modelConfig) {
     return process.env.XAI_REACTION_CLASSIFIER === "true";
   }
   return process.env.TELEGRAM_REACTION_CLASSIFIER !== "false";
+}
+
+function shouldRetryWithLeanContext(error, modelConfig) {
+  if (process.env.XAI_LEAN_CONTEXT_RETRY === "false") return false;
+  return modelConfig.provider === "xai" && error?.status >= 400 && error?.status < 500;
+}
+
+function getLeanContextTurnLimit() {
+  const configured = Number(process.env.XAI_LEAN_CONTEXT_TURNS || 8);
+  if (!Number.isFinite(configured) || configured < 1) return 8;
+  return Math.min(20, Math.floor(configured));
 }
 
 async function fetchMemoryBundle(profile, triggerName, triggerCatalog) {
@@ -2091,6 +2132,7 @@ app.get("/api/health", (_req, res) => {
       cognitiveOsBiographicalRemember: true,
       cognitiveOsMetaMemory: true,
       cognitiveOsStateVectors: true,
+      xaiLeanContextRetry: process.env.XAI_LEAN_CONTEXT_RETRY !== "false",
       supabaseSecretKeySupported: true,
       supabaseServerKeySource: process.env.SUPABASE_SERVICE_ROLE_KEY
         ? "SUPABASE_SERVICE_ROLE_KEY"
@@ -2145,7 +2187,8 @@ function createDebugInfo(model, modelConfig, triggerCatalog) {
     cognitiveIntentions: 0,
     cognitiveMetaMemory: 0,
     cognitiveStateVectors: 0,
-    cognitiveJobQueued: false
+    cognitiveJobQueued: false,
+    xaiLeanContextRetry: false
   };
 }
 
@@ -2237,12 +2280,15 @@ async function generateChatReply({
     cognitiveContext
   });
 
-  let messages = [
+  const buildChatMessages = ({
+    compactPrompt = fallbackContext.compactPrompt,
+    history = fallbackHistory
+  } = {}) => [
     { role: "system", content: buildSystemPrompt() },
     { role: "system", content: buildMemoryProtocolPrompt(triggerCatalog) },
     ...(cognitiveContext.prompt ? [{ role: "system", content: cognitiveContext.prompt }] : []),
-    ...(fallbackContext.compactPrompt ? [{ role: "system", content: fallbackContext.compactPrompt }] : []),
-    ...fallbackHistory,
+    ...(compactPrompt ? [{ role: "system", content: compactPrompt }] : []),
+    ...history,
     ...(conversationContextPrompt ? [{ role: "system", content: conversationContextPrompt }] : []),
     ...(memoryBlock ? [{ role: "system", content: "MEMORY:\n" + memoryBlock }] : []),
     ...(memoryBlock
@@ -2255,13 +2301,46 @@ async function generateChatReply({
     { role: "user", content: userMessage }
   ];
 
-  let reply = await callChatCompletion({
-    providerName: modelConfig.provider,
-    model: modelConfig.upstreamModel,
-    profile: modelConfig.profile,
-    purpose: "chat",
-    messages
-  });
+  let messages = buildChatMessages();
+  let reply;
+
+  try {
+    reply = await callChatCompletion({
+      providerName: modelConfig.provider,
+      model: modelConfig.upstreamModel,
+      profile: modelConfig.profile,
+      purpose: "chat",
+      messages
+    });
+  } catch (err) {
+    if (!shouldRetryWithLeanContext(err, modelConfig)) {
+      throw err;
+    }
+
+    const leanTurnLimit = getLeanContextTurnLimit();
+    const leanFallbackHistory = fallbackHistory.slice(-leanTurnLimit * 2);
+    messages = buildChatMessages({
+      compactPrompt: "",
+      history: leanFallbackHistory
+    });
+    debugInfo.xaiLeanContextRetry = true;
+
+    console.log("[XAI LEAN CONTEXT RETRY]", {
+      profile: modelConfig.profile,
+      model: modelConfig.upstreamModel,
+      originalStatus: err.status,
+      originalInputMessages: fallbackHistory.length,
+      retryInputMessages: leanFallbackHistory.length
+    });
+
+    reply = await callChatCompletion({
+      providerName: modelConfig.provider,
+      model: modelConfig.upstreamModel,
+      profile: modelConfig.profile,
+      purpose: "chat_lean_retry",
+      messages
+    });
+  }
 
   console.log("[MODEL RAW OUTPUT]", reply);
 
