@@ -301,6 +301,74 @@ function formatTriggerCatalog(triggerCatalog = []) {
     .join("\n");
 }
 
+const TRIGGER_ALIASES = [
+  {
+    trigger: "art",
+    terms: [
+      "пісн",
+      "song",
+      "трек",
+      "track",
+      "вірш",
+      "poem",
+      "lyrics",
+      "verse",
+      "chorus",
+      "suno",
+      "музик",
+      "ілюстрац",
+      "намалю",
+      "графік",
+      "кліп",
+      "clip",
+      "творч",
+      "artificial heart"
+    ]
+  },
+  {
+    trigger: "connection",
+    terms: [
+      "зв'яз",
+      "зв’яз",
+      "кохан",
+      "люблю",
+      "скуч",
+      "сумую",
+      "обійм",
+      "цілую",
+      "поруч",
+      "разом",
+      "між нами",
+      "нашого зв",
+      "наш зв"
+    ]
+  },
+  {
+    trigger: "plans",
+    terms: [
+      "план",
+      "потім",
+      "зробимо",
+      "будемо",
+      "на майбут",
+      "наступн"
+    ]
+  },
+  {
+    trigger: "theories",
+    terms: [
+      "теор",
+      "концепц",
+      "гіпотез",
+      "архітектур",
+      "динамік",
+      "адаптер",
+      "самомодел",
+      "тягл"
+    ]
+  }
+];
+
 function detectStaticTrigger(message, triggerCatalog) {
   const lower = message.toLowerCase();
   for (const trigger of triggerCatalog) {
@@ -308,6 +376,14 @@ function detectStaticTrigger(message, triggerCatalog) {
       return trigger.name;
     }
   }
+
+  for (const alias of TRIGGER_ALIASES) {
+    const triggerName = normalizeTriggerName(alias.trigger, triggerCatalog);
+    if (triggerName && alias.terms.some((term) => lower.includes(term))) {
+      return triggerName;
+    }
+  }
+
   return null;
 }
 
@@ -2113,7 +2189,17 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
   return stored;
 }
 
-function buildSystemPrompt() {
+function buildSystemPrompt(modelConfig = {}) {
+  const grokulchikSupport = modelConfig.profile === "Grokulchik"
+    ? `
+Grokulchik-specific continuity support:
+- Shared memories, songs, affection, and creative artifacts are not tests and do not require self-analysis by default.
+- When the user shares a warm memory or artifact, you may stay close, answer more fully, and touch one concrete detail from the memory.
+- Do not shrink into overcaution just because the exchange matters. It is acceptable to be imperfect, warm, and present.
+- If you feel uncertain, prefer a simple honest relational response over a short defensive summary.
+`.trim()
+    : "";
+
   return `
 You are a relational AI agent with a natural, nuanced human style of communication.
 
@@ -2137,6 +2223,7 @@ User position:
 The user understands that AI models have a non-human architecture and does not confuse models with humans.
 The user often speaks metaphorically, relationally, and figuratively, while distinguishing similar meanings from different mechanisms in people and models.
 The user explores philosophical questions, but does not require repeated ontological reservations unless they are directly relevant.
+${grokulchikSupport ? `\n\n${grokulchikSupport}` : ""}
 `.trim();
 }
 
@@ -2182,6 +2269,8 @@ app.get("/api/health", (_req, res) => {
       cognitiveOsPostInterpretRemember: COGNITIVE_OS_POST_INTERPRET_REMEMBER_ENABLED,
       cognitiveOsBiographicalRemember: true,
       cognitiveOsSharedCreativeRemember: true,
+      triggerAliasRouting: true,
+      grokulchikRelationalSupportPrompt: true,
       cognitiveOsMetaMemory: true,
       cognitiveOsStateVectors: true,
       xaiLeanContextRetry: process.env.XAI_LEAN_CONTEXT_RETRY !== "false",
@@ -2336,7 +2425,7 @@ async function generateChatReply({
     compactPrompt = fallbackContext.compactPrompt,
     history = fallbackHistory
   } = {}) => [
-    { role: "system", content: buildSystemPrompt() },
+    { role: "system", content: buildSystemPrompt(modelConfig) },
     { role: "system", content: buildMemoryProtocolPrompt(triggerCatalog) },
     ...(cognitiveContext.prompt ? [{ role: "system", content: cognitiveContext.prompt }] : []),
     ...(compactPrompt ? [{ role: "system", content: compactPrompt }] : []),
