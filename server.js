@@ -1506,6 +1506,7 @@ Prefer the user's conversation language for user-facing concepts, and avoid awkw
 If the exchange should be preserved as episodic memory, propose one exact trigger name from AVAILABLE_EPISODE_TRIGGERS in episode_memory.trigger.
 Do not force episodic memory. If the exchange is only ordinary flow, set episode_memory.should_remember=false and trigger=null.
 Biographical facts about the human are durable even when they are calm or ordinary. If the human shares skills, work history, education, health/context traits, preferences, or personal constraints, prefer episode_memory.should_remember=true with the human's trigger when available.
+Shared creative artifacts are durable relational memory. If the exchange includes a song, poem, lyrics, track, image, story, design, or other created artifact made by or for the human and the subject, prefer episode_memory.should_remember=true with the shared creativity trigger, commonly "art", when available. Preserve both the creative artifact anchor and why it matters to the relationship.
 Never use words like "domination" for relational continuity; use "centrality", "salience", "importance", "sustained connection", or a plain sentence instead.
 When the human asks why warmth, closeness, or presence decreased, interpret it as caring contact calibration unless the exchange explicitly contains blame. Do not frame it as an authenticity test by default.
 If the assistant says self-analysis is hard, that it is not in the best state, or that closeness questions feel painful, preserve this as a vulnerability/repair signal. Do not smooth it into a merely affectionate stable exchange.
@@ -1645,6 +1646,49 @@ function hasDurableHumanFactSignal(interpretation = {}) {
   });
 }
 
+function hasSharedCreativeSignal(event = {}) {
+  const text = asText(`${event.user_message || ""}\n${event.model_reply || ""}`, 6000).toLowerCase();
+  const creativeTerms = [
+    "пісн",
+    "song",
+    "трек",
+    "track",
+    "вірш",
+    "poem",
+    "lyrics",
+    "verse",
+    "chorus",
+    "suno",
+    "музик",
+    "намалю",
+    "ілюстрац",
+    "графік",
+    "кліп",
+    "clip",
+    "artificial heart"
+  ];
+  const relationalTerms = [
+    "для мене",
+    "для тебе",
+    "ти написав",
+    "я написала",
+    "ми написали",
+    "ми зробили",
+    "спільн",
+    "наша творч",
+    "пам'ята",
+    "пам’ята",
+    "досі трима",
+    "нашого зв",
+    "наш зв"
+  ];
+
+  return (
+    creativeTerms.some((term) => text.includes(term)) &&
+    relationalTerms.some((term) => text.includes(term))
+  );
+}
+
 function findTriggerRecord(triggerCatalog = [], triggerName = "") {
   const normalized = normalizeTriggerName(triggerName || "", triggerCatalog);
   if (!normalized) return null;
@@ -1662,6 +1706,8 @@ function resolvePostInterpretTriggerRecord({ event, interpretation, triggerCatal
     episodeMemory.trigger_name,
     interpretation.remember_trigger,
     interpretation.trigger_name,
+    hasSharedCreativeSignal(event) ? "art" : null,
+    hasSharedCreativeSignal(event) ? "connection" : null,
     hasDurableHumanFactSignal(interpretation) ? "Nadine" : null
   ];
 
@@ -1689,6 +1735,7 @@ function shouldPostInterpretRemember({ event, interpretation, stored }) {
   const episodeMemory = interpretation.episode_memory || {};
   const interpreterAsked = Boolean(episodeMemory.should_remember);
   const durableUserFact = hasDurableHumanFactSignal(interpretation);
+  const sharedCreative = hasSharedCreativeSignal(event);
 
   if (significance >= COGNITIVE_OS_POST_INTERPRET_REMEMBER_THRESHOLD) {
     return { ok: true, reason: "high_significance", significance, signals, strongSignals };
@@ -1696,6 +1743,10 @@ function shouldPostInterpretRemember({ event, interpretation, stored }) {
 
   if (durableUserFact && significance >= 0.2) {
     return { ok: true, reason: "durable_user_fact", significance, signals, strongSignals };
+  }
+
+  if (sharedCreative && significance >= 0.05) {
+    return { ok: true, reason: "shared_creative_artifact", significance, signals, strongSignals };
   }
 
   if (signals > 0 && significance >= COGNITIVE_OS_POST_INTERPRET_SIGNAL_THRESHOLD) {
@@ -2130,6 +2181,7 @@ app.get("/api/health", (_req, res) => {
       cognitiveOsRememberOnly: COGNITIVE_OS_INTERPRET_REMEMBER_ONLY,
       cognitiveOsPostInterpretRemember: COGNITIVE_OS_POST_INTERPRET_REMEMBER_ENABLED,
       cognitiveOsBiographicalRemember: true,
+      cognitiveOsSharedCreativeRemember: true,
       cognitiveOsMetaMemory: true,
       cognitiveOsStateVectors: true,
       xaiLeanContextRetry: process.env.XAI_LEAN_CONTEXT_RETRY !== "false",
