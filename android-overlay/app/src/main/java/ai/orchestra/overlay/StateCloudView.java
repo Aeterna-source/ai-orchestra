@@ -178,7 +178,8 @@ public final class StateCloudView extends View {
         if (index == 1) return "warmth";
         if (index == 2) return "inspiration";
         if (index == 3) return "focus";
-        return "tenderness";
+        if (index == 4) return "tenderness";
+        return "neutral";
     }
 
     private int[] dominantColor() {
@@ -219,7 +220,14 @@ public final class StateCloudView extends View {
         double focusBase = Math.min(1, state.stability * 0.34 + state.continuity * 0.22);
         double focus = focusBase * (1 - Math.max(0, warmth - 0.55) * 0.75);
         double tenderness = Math.min(1, state.warmth * 0.78 + warmCardSignal * 0.22);
-        return new double[]{drift, warmth, inspiration, focus, tenderness};
+        double relationalSignal = Math.max(warmth, Math.max(tenderness, inspiration));
+        double neutral = Math.min(1,
+            state.stability * 0.32 +
+            (1 - state.warmth) * 0.28 +
+            (1 - state.significance) * 0.16 +
+            state.driftRisk * 0.18
+        ) * (1 - relationalSignal * 0.44);
+        return new double[]{drift, warmth, inspiration, focus, tenderness, neutral};
     }
 
     private int[][] toneColors() {
@@ -228,7 +236,8 @@ public final class StateCloudView extends View {
             {244, 188, 83},
             {77, 194, 137},
             {85, 166, 232},
-            {246, 119, 174}
+            {246, 119, 174},
+            {238, 244, 247}
         };
     }
 

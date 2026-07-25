@@ -229,7 +229,14 @@ function toneScores() {
   const focusBase = Math.min(1, visualState.stability * 0.34 + visualState.continuity * 0.22);
   const focus = focusBase * (1 - Math.max(0, warmth - 0.55) * 0.75);
   const tenderness = Math.min(1, visualState.warmth * 0.78 + warmCardSignal * 0.22);
-  return [drift, warmth, inspiration, focus, tenderness];
+  const relationalSignal = Math.max(warmth, tenderness, inspiration);
+  const neutral = Math.min(1,
+    visualState.stability * 0.32 +
+    (1 - visualState.warmth) * 0.28 +
+    (1 - visualState.significance) * 0.16 +
+    visualState.driftRisk * 0.18
+  ) * (1 - relationalSignal * 0.44);
+  return [drift, warmth, inspiration, focus, tenderness, neutral];
 }
 
 function toneColors() {
@@ -238,7 +245,8 @@ function toneColors() {
     [244, 188, 83],
     [77, 194, 137],
     [85, 166, 232],
-    [246, 119, 174]
+    [246, 119, 174],
+    [238, 244, 247]
   ];
 }
 
@@ -248,7 +256,7 @@ function dominantToneIndex() {
 }
 
 function dominantTone() {
-  return ["danger", "warmth", "inspiration", "focus", "tenderness"][dominantToneIndex()];
+  return ["danger", "warmth", "inspiration", "focus", "tenderness", "neutral"][dominantToneIndex()];
 }
 
 function dominantColor() {

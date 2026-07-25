@@ -2337,6 +2337,7 @@ app.get("/api/health", (_req, res) => {
       grokulchikRelationalSupportPrompt: true,
       visualizationWarmthSmoothing: true,
       visualizationToneWeightsV2: true,
+      visualizationNeutralWhiteAxis: true,
       telegramImageInputs: true,
       xaiImageLeanRetry: true,
       telegramImageMaxCount: TELEGRAM_IMAGE_MAX_COUNT,
