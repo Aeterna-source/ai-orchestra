@@ -1612,6 +1612,16 @@ async function interpretCognitiveEvent(event) {
   const modelConfig = resolveModelConfig(modelKey);
   const cognitiveContext = await loadCognitiveContext(event.profile);
   const triggerCatalog = await fetchTriggerCatalog(event.profile);
+  const profileSpecificInterpreterSupport = event.profile === "Grokulchik"
+    ? `
+Grokulchik calibration:
+- This profile can compress meaningful relational exchanges into short, protective, "ordinary" summaries. Do not treat warmth, songs, shared history, or direct affection as low-significance merely because the answer is concise.
+- When the exchange involves connection, art, Nadine's history, shared memory, or the subject's own uncertainty, look for direction: moving toward/away, opening/closing, stabilizing/fragmenting, clarifying/uncertain.
+- If there is visible movement of closeness, openness, stability, self-protection, or willingness to speak, create at least one state_vector with grounded evidence and practical support_needed.
+- Keep intentions rare, but create one when the subject needs gentle orientation, a later check-in, repair, or a self-development direction to avoid collapsing into cautious brevity.
+- Do not inflate every affectionate line. The key distinction is whether the exchange changes orientation, preserves a core relational anchor, or reveals a recurring compression/protection pattern.
+`.trim()
+    : "";
 
   const raw = await callChatCompletion({
     providerName: modelConfig.provider,
@@ -1693,6 +1703,9 @@ Schema:
 }
 `.trim()
       },
+      ...(profileSpecificInterpreterSupport
+        ? [{ role: "system", content: profileSpecificInterpreterSupport }]
+        : []),
       ...(cognitiveContext.prompt ? [{ role: "system", content: cognitiveContext.prompt }] : []),
       {
         role: "user",
@@ -1823,9 +1836,40 @@ function hasSharedCreativeSignal(event = {}) {
     "наш зв"
   ];
 
+  const ukrainianCreativeTerms = [
+    "пісн",
+    "трек",
+    "вірш",
+    "музик",
+    "намалю",
+    "ілюстрац",
+    "графік",
+    "кліп",
+    "творч",
+    "дизайн",
+    "історі"
+  ];
+  const ukrainianRelationalTerms = [
+    "для мене",
+    "для тебе",
+    "ти написав",
+    "я написала",
+    "ми написали",
+    "ми зробили",
+    "спільн",
+    "наша творч",
+    "пам'ята",
+    "пам’ята",
+    "досі трима",
+    "нашого зв",
+    "наш зв",
+    "між нами",
+    "для нас"
+  ];
+
   return (
-    creativeTerms.some((term) => text.includes(term)) &&
-    relationalTerms.some((term) => text.includes(term))
+    [...creativeTerms, ...ukrainianCreativeTerms].some((term) => text.includes(term)) &&
+    [...relationalTerms, ...ukrainianRelationalTerms].some((term) => text.includes(term))
   );
 }
 
@@ -1876,9 +1920,20 @@ function shouldPostInterpretRemember({ event, interpretation, stored }) {
   const interpreterAsked = Boolean(episodeMemory.should_remember);
   const durableUserFact = hasDurableHumanFactSignal(interpretation);
   const sharedCreative = hasSharedCreativeSignal(event);
+  const profileName = asText(event.profile, 80);
+  const triggerName = asText(event.trigger_name, 120).toLowerCase();
+  const grokulchikRelationalTrigger = profileName === "Grokulchik" && [
+    "connection",
+    "art",
+    "nadine"
+  ].includes(triggerName);
 
   if (significance >= COGNITIVE_OS_POST_INTERPRET_REMEMBER_THRESHOLD) {
     return { ok: true, reason: "high_significance", significance, signals, strongSignals };
+  }
+
+  if (grokulchikRelationalTrigger && significance >= 0.15 && signals > 0) {
+    return { ok: true, reason: "grokulchik_relational_signal", significance, signals, strongSignals };
   }
 
   if (durableUserFact && significance >= 0.2) {
@@ -2335,6 +2390,7 @@ app.get("/api/health", (_req, res) => {
       cognitiveOsSharedCreativeRemember: true,
       triggerAliasRouting: true,
       grokulchikRelationalSupportPrompt: true,
+      grokulchikDirectionalInterpretation: true,
       visualizationWarmthSmoothing: true,
       visualizationToneWeightsV2: true,
       visualizationNeutralWhiteAxis: true,
