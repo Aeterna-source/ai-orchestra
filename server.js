@@ -2338,6 +2338,7 @@ app.get("/api/health", (_req, res) => {
       visualizationWarmthSmoothing: true,
       visualizationToneWeightsV2: true,
       telegramImageInputs: true,
+      xaiImageLeanRetry: true,
       telegramImageMaxCount: TELEGRAM_IMAGE_MAX_COUNT,
       telegramImageMaxBytes: TELEGRAM_IMAGE_MAX_BYTES,
       cognitiveOsMetaMemory: true,
@@ -2530,6 +2531,62 @@ async function generateChatReply({
     });
   } catch (err) {
     if (imageInputs.length && err?.status >= 400 && err?.status < 500) {
+      if (shouldRetryWithLeanContext(err, modelConfig)) {
+        const leanTurnLimit = getLeanContextTurnLimit();
+        const leanFallbackHistory = fallbackHistory.slice(-leanTurnLimit * 2);
+
+        try {
+          messages = buildChatMessages({
+            compactPrompt: "",
+            history: leanFallbackHistory
+          });
+          debugInfo.xaiLeanContextRetry = true;
+
+          console.log("[XAI IMAGE LEAN CONTEXT RETRY]", {
+            profile: modelConfig.profile,
+            model: modelConfig.upstreamModel,
+            originalStatus: err.status,
+            imageInputs: imageInputs.length,
+            leanMessages: messages.length
+          });
+
+          reply = await callChatCompletion({
+            providerName: modelConfig.provider,
+            model: modelConfig.upstreamModel,
+            profile: modelConfig.profile,
+            purpose: "chat_image_lean_retry",
+            messages
+          });
+        } catch (leanImageErr) {
+          messages = buildChatMessages({
+            compactPrompt: "",
+            history: leanFallbackHistory,
+            currentImageInputs: [],
+            currentUserMessage: [
+              userMessage,
+              "[Image input was rejected or could not be parsed by the provider in this request. Do not claim to see the image directly; ask the user for a description if needed.]"
+            ].join("\n")
+          });
+          debugInfo.imageTextOnlyRetry = true;
+
+          console.log("[XAI IMAGE TEXT-ONLY LEAN RETRY]", {
+            profile: modelConfig.profile,
+            model: modelConfig.upstreamModel,
+            originalStatus: err.status,
+            leanImageStatus: leanImageErr.status,
+            imageInputs: imageInputs.length,
+            leanMessages: messages.length
+          });
+
+          reply = await callChatCompletion({
+            providerName: modelConfig.provider,
+            model: modelConfig.upstreamModel,
+            profile: modelConfig.profile,
+            purpose: "chat_image_text_lean_retry",
+            messages
+          });
+        }
+      } else {
       messages = buildChatMessages({
         currentImageInputs: [],
         currentUserMessage: [
@@ -2553,6 +2610,7 @@ async function generateChatReply({
         purpose: "chat_image_text_retry",
         messages
       });
+      }
     } else if (!shouldRetryWithLeanContext(err, modelConfig)) {
       throw err;
     } else {
@@ -3338,7 +3396,10 @@ async function handleTelegramUpdate(botConfig, update) {
     const strippedText = stripBotMention(text, botConfig);
     let userMessage = strippedText;
     if (loadedImages.imageInputs.length) {
-      userMessage = [strippedText || "Please look at this image and respond naturally.", "[Image attached.]"]
+      userMessage = [
+        strippedText || "Please look at this image and respond naturally.",
+        "[Image attached and available for visual inspection. Look at it directly; do not say you lack image details unless the provider rejects the image.]"
+      ]
         .filter(Boolean)
         .join("\n");
     } else if (hasImage) {
