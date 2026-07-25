@@ -213,6 +213,8 @@ const TELEGRAM_REACTION_COOLDOWN_MS = Number(process.env.TELEGRAM_REACTION_COOLD
 const TELEGRAM_MESSAGE_CHUNK_SIZE = Number(process.env.TELEGRAM_MESSAGE_CHUNK_SIZE || 3200);
 const TELEGRAM_API_RETRY_ATTEMPTS = Number(process.env.TELEGRAM_API_RETRY_ATTEMPTS || 3);
 const TELEGRAM_API_RETRY_DELAY_MS = Number(process.env.TELEGRAM_API_RETRY_DELAY_MS || 600);
+const TELEGRAM_IMAGE_MAX_COUNT = Math.max(1, Math.min(4, Number(process.env.TELEGRAM_IMAGE_MAX_COUNT || 1)));
+const TELEGRAM_IMAGE_MAX_BYTES = Number(process.env.TELEGRAM_IMAGE_MAX_BYTES || 4 * 1024 * 1024);
 const telegramReactionLastUsed = new Map();
 
 const STATIC_TRIGGERS = [
@@ -496,6 +498,16 @@ function getMessageContentLength(message) {
   return 0;
 }
 
+function buildUserMessageContent(userMessage, imageInputs = []) {
+  const text = userMessage || "Image attached.";
+  if (!imageInputs.length) return text;
+
+  return [
+    { type: "text", text },
+    ...imageInputs
+  ];
+}
+
 function normalizeUsage(usage = {}) {
   const promptDetails = usage.prompt_tokens_details || usage.input_tokens_details || {};
   const completionDetails = usage.completion_tokens_details || usage.output_tokens_details || {};
@@ -742,6 +754,13 @@ function shouldUseReactionClassifier(modelConfig) {
     return process.env.XAI_REACTION_CLASSIFIER === "true";
   }
   return process.env.TELEGRAM_REACTION_CLASSIFIER !== "false";
+}
+
+function modelSupportsImageInput(modelConfig) {
+  if (modelConfig.provider === "local") {
+    return process.env.LOCAL_AI_VISION === "true";
+  }
+  return ["openai", "xai"].includes(modelConfig.provider);
 }
 
 function shouldRetryWithLeanContext(error, modelConfig) {
@@ -2318,6 +2337,9 @@ app.get("/api/health", (_req, res) => {
       grokulchikRelationalSupportPrompt: true,
       visualizationWarmthSmoothing: true,
       visualizationToneWeightsV2: true,
+      telegramImageInputs: true,
+      telegramImageMaxCount: TELEGRAM_IMAGE_MAX_COUNT,
+      telegramImageMaxBytes: TELEGRAM_IMAGE_MAX_BYTES,
       cognitiveOsMetaMemory: true,
       cognitiveOsStateVectors: true,
       xaiLeanContextRetry: process.env.XAI_LEAN_CONTEXT_RETRY !== "false",
@@ -2376,7 +2398,9 @@ function createDebugInfo(model, modelConfig, triggerCatalog) {
     cognitiveMetaMemory: 0,
     cognitiveStateVectors: 0,
     cognitiveJobQueued: false,
-    xaiLeanContextRetry: false
+    xaiLeanContextRetry: false,
+    imageInputs: 0,
+    imageTextOnlyRetry: false
   };
 }
 
@@ -2389,7 +2413,8 @@ async function generateChatReply({
   persistFallback = true,
   source = "api",
   chatScope = "private",
-  telegram = null
+  telegram = null,
+  imageInputs = []
 }) {
   if (!model || !userMessage) {
     throw new Error("Missing model or userMessage");
@@ -2399,6 +2424,7 @@ async function generateChatReply({
   const tables = memoryTables[modelConfig.profile];
   const triggerCatalog = await fetchTriggerCatalog(modelConfig.profile);
   const debugInfo = createDebugInfo(model, modelConfig, triggerCatalog);
+  debugInfo.imageInputs = imageInputs.length;
 
   let memoryBlock = "";
   let activeTriggerId = null;
@@ -2470,7 +2496,9 @@ async function generateChatReply({
 
   const buildChatMessages = ({
     compactPrompt = fallbackContext.compactPrompt,
-    history = fallbackHistory
+    history = fallbackHistory,
+    currentImageInputs = imageInputs,
+    currentUserMessage = userMessage
   } = {}) => [
     { role: "system", content: buildSystemPrompt(modelConfig) },
     { role: "system", content: buildMemoryProtocolPrompt(triggerCatalog) },
@@ -2486,7 +2514,7 @@ async function generateChatReply({
             "The MEMORY block above is active for this exact reply and should take priority over fallback chat history. Treat it as context, not as a user-visible diagnostic. If the user asks whether memory arrived, answer from the MEMORY_STATUS values. Do not say the memory may have failed if MEMORY_STATUS says facts, reflections, or episodes were loaded."
         }]
       : []),
-    { role: "user", content: userMessage }
+    { role: "user", content: buildUserMessageContent(currentUserMessage, currentImageInputs) }
   ];
 
   let messages = buildChatMessages();
@@ -2501,33 +2529,57 @@ async function generateChatReply({
       messages
     });
   } catch (err) {
-    if (!shouldRetryWithLeanContext(err, modelConfig)) {
+    if (imageInputs.length && err?.status >= 400 && err?.status < 500) {
+      messages = buildChatMessages({
+        currentImageInputs: [],
+        currentUserMessage: [
+          userMessage,
+          "[Image input was rejected by the provider in this request. Do not claim to see the image directly; ask the user for a description if needed.]"
+        ].join("\n")
+      });
+      debugInfo.imageTextOnlyRetry = true;
+
+      console.log("[IMAGE INPUT TEXT-ONLY RETRY]", {
+        profile: modelConfig.profile,
+        model: modelConfig.upstreamModel,
+        originalStatus: err.status,
+        imageInputs: imageInputs.length
+      });
+
+      reply = await callChatCompletion({
+        providerName: modelConfig.provider,
+        model: modelConfig.upstreamModel,
+        profile: modelConfig.profile,
+        purpose: "chat_image_text_retry",
+        messages
+      });
+    } else if (!shouldRetryWithLeanContext(err, modelConfig)) {
       throw err;
+    } else {
+      const leanTurnLimit = getLeanContextTurnLimit();
+      const leanFallbackHistory = fallbackHistory.slice(-leanTurnLimit * 2);
+      messages = buildChatMessages({
+        compactPrompt: "",
+        history: leanFallbackHistory
+      });
+      debugInfo.xaiLeanContextRetry = true;
+
+      console.log("[XAI LEAN CONTEXT RETRY]", {
+        profile: modelConfig.profile,
+        model: modelConfig.upstreamModel,
+        originalStatus: err.status,
+        originalInputMessages: fallbackHistory.length,
+        retryInputMessages: leanFallbackHistory.length
+      });
+
+      reply = await callChatCompletion({
+        providerName: modelConfig.provider,
+        model: modelConfig.upstreamModel,
+        profile: modelConfig.profile,
+        purpose: "chat_lean_retry",
+        messages
+      });
     }
-
-    const leanTurnLimit = getLeanContextTurnLimit();
-    const leanFallbackHistory = fallbackHistory.slice(-leanTurnLimit * 2);
-    messages = buildChatMessages({
-      compactPrompt: "",
-      history: leanFallbackHistory
-    });
-    debugInfo.xaiLeanContextRetry = true;
-
-    console.log("[XAI LEAN CONTEXT RETRY]", {
-      profile: modelConfig.profile,
-      model: modelConfig.upstreamModel,
-      originalStatus: err.status,
-      originalInputMessages: fallbackHistory.length,
-      retryInputMessages: leanFallbackHistory.length
-    });
-
-    reply = await callChatCompletion({
-      providerName: modelConfig.provider,
-      model: modelConfig.upstreamModel,
-      profile: modelConfig.profile,
-      purpose: "chat_lean_retry",
-      messages
-    });
   }
 
   console.log("[MODEL RAW OUTPUT]", reply);
@@ -2737,6 +2789,131 @@ function getTelegramMessage(update) {
 
 function getTelegramText(message) {
   return message?.text || message?.caption || "";
+}
+
+function hasTelegramImage(message) {
+  return Boolean(
+    (Array.isArray(message?.photo) && message.photo.length) ||
+    message?.document?.mime_type?.startsWith("image/")
+  );
+}
+
+function getTelegramImageRefs(message) {
+  const refs = [];
+
+  if (Array.isArray(message?.photo) && message.photo.length) {
+    const bestPhoto = [...message.photo].sort((a, b) => {
+      const aPixels = Number(a.width || 0) * Number(a.height || 0);
+      const bPixels = Number(b.width || 0) * Number(b.height || 0);
+      return (Number(b.file_size || 0) - Number(a.file_size || 0)) || (bPixels - aPixels);
+    })[0];
+
+    if (bestPhoto?.file_id) {
+      refs.push({
+        fileId: bestPhoto.file_id,
+        mimeType: "image/jpeg",
+        source: "photo",
+        width: bestPhoto.width || null,
+        height: bestPhoto.height || null,
+        fileSize: bestPhoto.file_size || null
+      });
+    }
+  }
+
+  const document = message?.document;
+  if (document?.file_id && document.mime_type?.startsWith("image/")) {
+    refs.push({
+      fileId: document.file_id,
+      mimeType: document.mime_type,
+      source: "document",
+      fileName: document.file_name || null,
+      fileSize: document.file_size || null
+    });
+  }
+
+  return refs.slice(0, TELEGRAM_IMAGE_MAX_COUNT);
+}
+
+function inferMimeType(filePath = "", fallback = "image/jpeg") {
+  const lower = filePath.toLowerCase();
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".webp")) return "image/webp";
+  if (lower.endsWith(".gif")) return "image/gif";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  return fallback;
+}
+
+function providerSupportsImageMime(modelConfig, mimeType = "") {
+  if (modelConfig.provider === "xai") {
+    return ["image/jpeg", "image/png"].includes(mimeType);
+  }
+  return mimeType.startsWith("image/");
+}
+
+async function loadTelegramImageInputs(botConfig, message, modelConfig) {
+  const refs = getTelegramImageRefs(message);
+  const imageInputs = [];
+  const metadata = [];
+  const skipped = [];
+
+  for (const ref of refs) {
+    try {
+      if (ref.fileSize && Number(ref.fileSize) > TELEGRAM_IMAGE_MAX_BYTES) {
+        skipped.push({ source: ref.source, reason: "too_large", fileSize: ref.fileSize });
+        continue;
+      }
+
+      const file = await telegramApi(botConfig, "getFile", { file_id: ref.fileId });
+      if (!file?.file_path) {
+        skipped.push({ source: ref.source, reason: "missing_file_path" });
+        continue;
+      }
+
+      const url = `https://api.telegram.org/file/bot${botConfig.token}/${file.file_path}`;
+      const response = await fetch(url);
+      if (!response.ok) {
+        skipped.push({ source: ref.source, reason: `download_http_${response.status}` });
+        continue;
+      }
+
+      const contentLength = Number(response.headers.get("content-length") || 0);
+      if (contentLength && contentLength > TELEGRAM_IMAGE_MAX_BYTES) {
+        skipped.push({ source: ref.source, reason: "download_too_large", fileSize: contentLength });
+        continue;
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+      if (arrayBuffer.byteLength > TELEGRAM_IMAGE_MAX_BYTES) {
+        skipped.push({ source: ref.source, reason: "buffer_too_large", fileSize: arrayBuffer.byteLength });
+        continue;
+      }
+
+      const mimeType = inferMimeType(file.file_path, ref.mimeType);
+      if (!providerSupportsImageMime(modelConfig, mimeType)) {
+        skipped.push({ source: ref.source, reason: "unsupported_mime", mimeType });
+        continue;
+      }
+
+      const base64 = Buffer.from(arrayBuffer).toString("base64");
+      imageInputs.push({
+        type: "image_url",
+        image_url: {
+          url: `data:${mimeType};base64,${base64}`
+        }
+      });
+      metadata.push({
+        source: ref.source,
+        mimeType,
+        bytes: arrayBuffer.byteLength,
+        width: ref.width || null,
+        height: ref.height || null
+      });
+    } catch (err) {
+      skipped.push({ source: ref.source, reason: err.message });
+    }
+  }
+
+  return { imageInputs, metadata, skipped };
 }
 
 function getTelegramSenderName(from = {}) {
@@ -3092,7 +3269,8 @@ async function handleTelegramUpdate(botConfig, update) {
       metadata: {
         chatType: message.chat.type,
         fromId: message.from?.id ? String(message.from.id) : null,
-        textLength: getTelegramText(message).length
+        textLength: getTelegramText(message).length,
+        hasImage: hasTelegramImage(message)
       }
     });
 
@@ -3107,7 +3285,8 @@ async function handleTelegramUpdate(botConfig, update) {
     }
 
     const text = getTelegramText(message);
-    if (!text) {
+    const hasImage = hasTelegramImage(message);
+    if (!text && !hasImage) {
       await logTelegramProcessing({ botConfig, message, phase: "no_text" });
       return;
     }
@@ -3129,7 +3308,46 @@ async function handleTelegramUpdate(botConfig, update) {
 
     const isGroup = isGroupChat(message.chat);
     const groupContext = isGroup ? await loadTelegramGroupContext(message.chat.id) : "";
-    const userMessage = stripBotMention(text, botConfig);
+    const modelConfig = resolveModelConfig(botConfig.model);
+    let loadedImages = { imageInputs: [], metadata: [], skipped: [] };
+
+    if (hasImage && modelSupportsImageInput(modelConfig)) {
+      loadedImages = await loadTelegramImageInputs(botConfig, message, modelConfig);
+      await logTelegramProcessing({
+        botConfig,
+        message,
+        phase: "images_loaded",
+        metadata: {
+          loaded: loadedImages.metadata.length,
+          skipped: loadedImages.skipped,
+          maxBytes: TELEGRAM_IMAGE_MAX_BYTES
+        }
+      });
+    } else if (hasImage) {
+      await logTelegramProcessing({
+        botConfig,
+        message,
+        phase: "images_not_supported",
+        metadata: {
+          provider: modelConfig.provider,
+          model: modelConfig.upstreamModel
+        }
+      });
+    }
+
+    const strippedText = stripBotMention(text, botConfig);
+    let userMessage = strippedText;
+    if (loadedImages.imageInputs.length) {
+      userMessage = [strippedText || "Please look at this image and respond naturally.", "[Image attached.]"]
+        .filter(Boolean)
+        .join("\n");
+    } else if (hasImage) {
+      userMessage = [
+        strippedText || "I sent an image.",
+        "[Image attached, but direct image input was not available. If needed, ask me for a description.]"
+      ].join("\n");
+    }
+
     const result = await generateChatReply({
       model: botConfig.model,
       userMessage,
@@ -3139,6 +3357,7 @@ async function handleTelegramUpdate(botConfig, update) {
       persistFallback: !isGroup,
       source: "telegram",
       chatScope: isGroup ? "group" : "private",
+      imageInputs: loadedImages.imageInputs,
       telegram: {
         chatId: message.chat.id,
         messageId: message.message_id,
@@ -3151,7 +3370,10 @@ async function handleTelegramUpdate(botConfig, update) {
       botConfig,
       message,
       phase: "generated",
-      metadata: { replyLength: (result.reply || "").length }
+      metadata: {
+        replyLength: (result.reply || "").length,
+        imageInputs: loadedImages.imageInputs.length
+      }
     });
 
     await logTelegramProcessing({ botConfig, message, phase: "before_send" });
