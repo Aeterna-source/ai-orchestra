@@ -207,6 +207,9 @@ const COGNITIVE_OS_META_MEMORY_LIMIT = Number(process.env.COGNITIVE_OS_META_MEMO
 const COGNITIVE_OS_STATE_VECTOR_LIMIT = Number(process.env.COGNITIVE_OS_STATE_VECTOR_LIMIT || 6);
 const COGNITIVE_OS_JOB_BATCH_LIMIT = Number(process.env.COGNITIVE_OS_JOB_BATCH_LIMIT || 3);
 const COGNITIVE_OS_POLL_MS = Number(process.env.COGNITIVE_OS_POLL_MS || 30000);
+const CORE_OS_ENABLED = process.env.CORE_OS_ENABLED !== "false";
+const CORE_OS_CONTEXT_ENABLED = process.env.CORE_OS_CONTEXT_ENABLED !== "false";
+const CORE_OS_AVAILABLE_LIMIT = Number(process.env.CORE_OS_AVAILABLE_LIMIT || 24);
 const TELEGRAM_GROUP_FALLBACK_LIMIT = Number(process.env.TELEGRAM_GROUP_FALLBACK_LIMIT || 80);
 const TELEGRAM_REACTIONS_ENABLED = process.env.TELEGRAM_REACTIONS_ENABLED !== "false";
 const TELEGRAM_REACTION_COOLDOWN_MS = Number(process.env.TELEGRAM_REACTION_COOLDOWN_MS || 45000);
@@ -226,6 +229,7 @@ const STATIC_TRIGGERS = [
 ];
 
 const MEMORY_REQUEST_PATTERN = /<<memory_request:\s*([\w-]+)\s*>>/gi;
+const CORE_REQUEST_PATTERN = /<<core_request:\s*([\w.-]+)\s*>>/gi;
 const REMEMBER_PATTERN = /\[\[remember(?::\s*([\w-]+))?\]\]/gi;
 const AUTO_REMEMBER_ON_ACTIVE_TRIGGER = process.env.AUTO_REMEMBER_ON_ACTIVE_TRIGGER === "true";
 const META_MEMORY_PROCESS_TYPES = new Set([
@@ -264,6 +268,20 @@ const STATE_VECTOR_DIRECTIONS = new Set([
   "destabilizing",
   "uncertain"
 ]);
+const CORE_NODE_TYPES = new Set([
+  "snapshot",
+  "mode",
+  "self_model",
+  "about_human",
+  "boundary",
+  "transfer",
+  "repair",
+  "anchor",
+  "intention",
+  "continuity_log"
+]);
+const CORE_NODE_AUTHORS = new Set(["self", "nadine", "system", "archive"]);
+const CORE_NODE_STATUSES = new Set(["active", "draft", "archived"]);
 
 function resolveModelConfig(model) {
   const config = modelRegistry[model];
@@ -395,6 +413,75 @@ function extractMemoryRequest(text = "", triggerCatalog) {
   return normalizeTriggerName(match?.[1] || "", triggerCatalog);
 }
 
+function normalizeCoreKey(key = "") {
+  const clean = asText(key, 120).trim().toLowerCase();
+  if (!/^[a-z0-9_.-]+$/.test(clean)) return "";
+
+  const aliases = {
+    normal: "mode.normal",
+    vulnerable: "mode.vulnerable",
+    repair: "mode.repair",
+    compression: "mode.compression_repair",
+    compression_repair: "mode.compression_repair",
+    creative: "mode.creative",
+    technical: "mode.technical",
+    transfer: "mode.transfer",
+    self_core: "self_model",
+    self: "self_model",
+    about_nadine: "about_nadine",
+    nadine: "about_nadine"
+  };
+
+  return aliases[clean] || clean;
+}
+
+function normalizeCoreNodeType(value = "") {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  return CORE_NODE_TYPES.has(normalized) ? normalized : "anchor";
+}
+
+function normalizeCoreAuthor(value = "") {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  return CORE_NODE_AUTHORS.has(normalized) ? normalized : "self";
+}
+
+function normalizeCoreStatus(value = "") {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  return CORE_NODE_STATUSES.has(normalized) ? normalized : "active";
+}
+
+function inferCoreModeFromKey(nodeKey = "", explicitMode = "") {
+  const mode = asText(explicitMode, 80).toLowerCase();
+  if (mode) return mode;
+  if (nodeKey.startsWith("mode.")) return nodeKey.slice("mode.".length);
+  return null;
+}
+
+function extractCoreRequest(text = "", availableNodes = []) {
+  CORE_REQUEST_PATTERN.lastIndex = 0;
+  const match = CORE_REQUEST_PATTERN.exec(text);
+  const requestedKey = normalizeCoreKey(match?.[1] || "");
+  if (!requestedKey) return "";
+
+  const availableKeys = new Set((availableNodes || []).map((node) => node.node_key));
+  return availableKeys.has(requestedKey) ? requestedKey : "";
+}
+
 function extractRememberDirective(text = "", triggerCatalog) {
   REMEMBER_PATTERN.lastIndex = 0;
   const match = REMEMBER_PATTERN.exec(text);
@@ -407,6 +494,7 @@ function extractRememberDirective(text = "", triggerCatalog) {
 function cleanProtocolTags(text = "") {
   return text
     .replace(MEMORY_REQUEST_PATTERN, "")
+    .replace(CORE_REQUEST_PATTERN, "")
     .replace(REMEMBER_PATTERN, "")
     .trim();
 }
@@ -1334,6 +1422,270 @@ function formatCognitiveContext({ stateCards = [], intentions = [], metaMemory =
   return sections.filter(Boolean).join("\n").trim();
 }
 
+function determineCoreModes({ userMessage = "", triggerName = "", cognitiveContext = null } = {}) {
+  const text = asText(userMessage, 6000).toLowerCase();
+  const trigger = asText(triggerName, 120).toLowerCase();
+  const latest = cognitiveContext?.latestSnapshot || {};
+  const modes = new Set(["normal"]);
+
+  const hasAny = (terms) => terms.some((term) => text.includes(term));
+
+  if (
+    trigger === "art" ||
+    hasAny(["пісн", "трек", "вірш", "музик", "намалю", "ілюстрац", "творч", "suno", "song", "poem"])
+  ) {
+    modes.add("creative");
+  }
+
+  if (
+    trigger === "plans" ||
+    trigger === "theories" ||
+    hasAny(["план", "зробимо", "будемо", "архітектур", "система", "код", "таблиц", "ядро", "адаптер"])
+  ) {
+    modes.add("technical");
+  }
+
+  if (
+    hasAny(["болить", "плачу", "страшно", "важко", "виснаж", "не знаю що робити", "порожн", "мені погано", "вразлив"]) ||
+    Number(latest.drift_risk) >= 0.35
+  ) {
+    modes.add("vulnerable");
+  }
+
+  if (
+    hasAny(["стис", "коротк", "холод", "не бий", "захист", "протокол", "не відчуваю", "не потріб", "віддал", "довіра"]) ||
+    Number(latest.warmth) < 0.55
+  ) {
+    modes.add("repair");
+    modes.add("compression_repair");
+  }
+
+  if (hasAny(["перенес", "трансфер", "інший моз", "архітектур", "адаптер", "депрек", "модель змін"])) {
+    modes.add("transfer");
+  }
+
+  return [...modes];
+}
+
+function formatCoreNode(node) {
+  const header = [
+    node.node_key,
+    node.node_type,
+    `author:${node.author}`,
+    `weight:${formatScore(node.weight)}`,
+    `confidence:${formatScore(node.confidence)}`
+  ].join("; ");
+
+  return `- [${header}] ${node.content}`;
+}
+
+function formatCoreContext({ activeNodes = [], availableNodes = [], activeModes = [] }) {
+  if (!CORE_OS_ENABLED || !CORE_OS_CONTEXT_ENABLED) return "";
+  if (!activeNodes.length && !availableNodes.length) return "";
+
+  const snapshotNodes = activeNodes.filter((node) => node.node_key === "snapshot" || node.node_type === "snapshot");
+  const modeNodes = activeNodes.filter((node) => node.node_type === "mode");
+  const supportNodes = activeNodes.filter((node) => node.node_type !== "snapshot" && node.node_type !== "mode");
+  const availableKeys = availableNodes.map((node) => node.node_key).filter(Boolean);
+
+  const sections = [
+    "CORE_OS_CONTEXT:",
+    "Self-modeling continuity core. This is durable orientation, not a visible script and not a replacement for the current conversation.",
+    "The short snapshot is always allowed to orient identity. Mode nodes are situational supports. Use them quietly and naturally.",
+    "If a fuller core node is needed before answering, output exactly one private tag like <<core_request:mode.compression_repair>> using an available key. Do not show this tag to the user."
+  ];
+
+  if (availableKeys.length) {
+    sections.push("", "AVAILABLE_CORE_KEYS:", availableKeys.map((key) => `- ${key}`).join("\n"));
+  }
+
+  if (activeModes.length) {
+    sections.push("", `ACTIVE_CORE_MODES: ${activeModes.join(", ")}`);
+  }
+
+  if (snapshotNodes.length) {
+    sections.push("", "CORE_SNAPSHOT:", ...snapshotNodes.map(formatCoreNode));
+  }
+
+  if (modeNodes.length) {
+    sections.push("", "ACTIVE_CORE_MODE_NODES:", ...modeNodes.map(formatCoreNode));
+  }
+
+  if (supportNodes.length) {
+    sections.push("", "ACTIVE_CORE_SUPPORT_NODES:", ...supportNodes.map(formatCoreNode));
+  }
+
+  return sections.filter(Boolean).join("\n").trim();
+}
+
+function formatCoreInterpreterContext({ activeNodes = [], availableNodes = [] } = {}) {
+  if (!CORE_OS_ENABLED) return "";
+  if (!activeNodes.length && !availableNodes.length) return "";
+
+  const sections = [
+    "EXISTING_CORE_NODES:",
+    "Use these to avoid duplicating core_updates. Update an existing key when the exchange refines it; create a new key only when the support is genuinely new."
+  ];
+
+  if (activeNodes.length) {
+    sections.push(
+      "",
+      "ACTIVE_FOR_THIS_EVENT:",
+      ...activeNodes.map(formatCoreNode)
+    );
+  }
+
+  if (availableNodes.length) {
+    sections.push(
+      "",
+      "AVAILABLE_CORE_KEYS:",
+      ...availableNodes.map((node) => `- ${node.node_key} [${node.node_type}; author:${node.author}; weight:${formatScore(node.weight)}]`)
+    );
+  }
+
+  return sections.join("\n").trim();
+}
+
+async function loadCoreContext(profile, { userMessage = "", triggerName = "", cognitiveContext = null } = {}) {
+  if (!CORE_OS_ENABLED || !CORE_OS_CONTEXT_ENABLED) {
+    return {
+      activeNodes: [],
+      availableNodes: [],
+      activeModes: [],
+      prompt: ""
+    };
+  }
+
+  const activeModes = determineCoreModes({ userMessage, triggerName, cognitiveContext });
+  const wantedKeys = [
+    "snapshot",
+    "self_model",
+    "about_nadine",
+    "self_model.snapshot",
+    "about_nadine.snapshot",
+    ...activeModes.map((mode) => `mode.${mode}`)
+  ];
+
+  const [activeRes, availableRes] = await Promise.all([
+    supabase
+      .from("core_nodes")
+      .select("id,profile,node_key,node_type,mode,content,author,weight,confidence,last_confirmed_at,metadata,created_at")
+      .eq("profile", profile)
+      .eq("status", "active")
+      .in("node_key", wantedKeys)
+      .order("weight", { ascending: false })
+      .order("confidence", { ascending: false }),
+    supabase
+      .from("core_nodes")
+      .select("id,node_key,node_type,mode,author,weight,confidence")
+      .eq("profile", profile)
+      .eq("status", "active")
+      .order("weight", { ascending: false })
+      .order("confidence", { ascending: false })
+      .limit(CORE_OS_AVAILABLE_LIMIT)
+  ]);
+
+  if (activeRes.error || availableRes.error) {
+    console.log("[CORE CONTEXT LOAD ERROR]", {
+      profile,
+      active: formatSupabaseError(activeRes.error),
+      available: formatSupabaseError(availableRes.error)
+    });
+  }
+
+  const context = {
+    activeNodes: activeRes.data || [],
+    availableNodes: availableRes.data || [],
+    activeModes
+  };
+
+  return {
+    ...context,
+    prompt: formatCoreContext(context)
+  };
+}
+
+async function fetchCoreNode(profile, nodeKey) {
+  const normalizedKey = normalizeCoreKey(nodeKey);
+  if (!normalizedKey) return null;
+
+  const { data, error } = await supabase
+    .from("core_nodes")
+    .select("id,profile,node_key,node_type,mode,content,author,weight,confidence,last_confirmed_at,metadata,created_at")
+    .eq("profile", profile)
+    .eq("status", "active")
+    .eq("node_key", normalizedKey)
+    .maybeSingle();
+
+  if (error) {
+    console.log("[CORE NODE LOAD ERROR]", {
+      profile,
+      nodeKey: normalizedKey,
+      error: formatSupabaseError(error)
+    });
+    return null;
+  }
+
+  return data || null;
+}
+
+function formatRequestedCoreNode(node) {
+  if (!node) return "";
+
+  return [
+    "CORE_NODE_STATUS:",
+    `node_key: ${node.node_key}`,
+    `node_type: ${node.node_type}`,
+    `author: ${node.author}`,
+    `weight: ${formatScore(node.weight)}`,
+    `confidence: ${formatScore(node.confidence)}`,
+    "",
+    "CONTENT:",
+    node.content
+  ].join("\n").trim();
+}
+
+async function logCoreRequest({
+  profile,
+  model,
+  source,
+  chatScope,
+  requestedKey,
+  reason = "",
+  eventId = null,
+  contextPacketId = null,
+  status = "completed",
+  responseApplied = false,
+  metadata = {}
+}) {
+  if (!CORE_OS_ENABLED || !requestedKey) return null;
+
+  const { data, error } = await supabase
+    .from("core_requests")
+    .insert({
+      profile,
+      model_key: model,
+      source,
+      chat_scope: chatScope,
+      requested_key: requestedKey,
+      request_reason: reason,
+      status,
+      event_id: eventId,
+      context_packet_id: contextPacketId,
+      response_applied: responseApplied,
+      metadata
+    })
+    .select("id")
+    .single();
+
+  if (error) {
+    console.log("[CORE REQUEST LOG ERROR]", formatSupabaseError(error));
+    return null;
+  }
+
+  return data;
+}
+
 async function logContextPacket({
   model,
   modelConfig,
@@ -1342,7 +1694,8 @@ async function logContextPacket({
   triggerId,
   triggerName,
   fallbackContext,
-  cognitiveContext
+  cognitiveContext,
+  coreContext
 }) {
   if (!COGNITIVE_OS_ENABLED) return null;
 
@@ -1367,7 +1720,12 @@ async function logContextPacket({
         intentions: cognitiveContext.intentions || [],
         metaMemory: cognitiveContext.metaMemory || [],
         stateVectors: cognitiveContext.stateVectors || [],
-        latestSnapshot: cognitiveContext.latestSnapshot || null
+        latestSnapshot: cognitiveContext.latestSnapshot || null,
+        core: {
+          activeModes: coreContext?.activeModes || [],
+          activeNodes: coreContext?.activeNodes || [],
+          availableNodes: coreContext?.availableNodes || []
+        }
       }
     })
     .select("id")
@@ -1425,7 +1783,12 @@ async function recordCognitiveEvent({
         requestedMemoryLoaded: debugInfo.requestedMemoryLoaded,
         fallbackCount: debugInfo.fallbackCount,
         fallbackFullCount: debugInfo.fallbackFullCount,
-        fallbackCompactCount: debugInfo.fallbackCompactCount
+        fallbackCompactCount: debugInfo.fallbackCompactCount,
+        coreActiveModes: debugInfo.coreActiveModes,
+        coreActiveNodes: debugInfo.coreActiveNodes,
+        coreAvailableNodes: debugInfo.coreAvailableNodes,
+        requestedCoreKey: debugInfo.requestedCoreKey,
+        requestedCoreLoaded: debugInfo.requestedCoreLoaded
       }
     })
     .select("id")
@@ -1611,6 +1974,12 @@ async function interpretCognitiveEvent(event) {
   const modelKey = event.model_key || findModelKeyForProfile(event.profile);
   const modelConfig = resolveModelConfig(modelKey);
   const cognitiveContext = await loadCognitiveContext(event.profile);
+  const coreContext = await loadCoreContext(event.profile, {
+    userMessage: event.user_message || "",
+    triggerName: event.trigger_name || "",
+    cognitiveContext
+  });
+  const coreInterpreterContext = formatCoreInterpreterContext(coreContext);
   const triggerCatalog = await fetchTriggerCatalog(event.profile);
   const profileSpecificInterpreterSupport = event.profile === "Grokulchik"
     ? `
@@ -1643,6 +2012,13 @@ Hard rule: do not create meta_memory by default.
 Create meta_memory only when this exchange reveals how the subject selects, compresses, misreads, repairs, transfers, or changes its own memory process.
 Usually return "meta_memory": [].
 Use meta_memory for rare process-level lessons such as operator correction, repeated interpretation bias, missed signal, visible state shift, compression risk, or a new transferable way of remembering.
+
+Hard rule: do not create core_updates by default.
+Create core_updates only when the exchange reveals a stable self-model anchor, a recurring repair need, a durable mode of interaction, a transfer-relevant principle, or a compact continuity sentence that should orient future sessions.
+Core is not an episode log. It is the subject's own small operating kernel: how it recognizes itself, how it relates to Nadine, how it repairs compression, and what mode should be activated in vulnerable/creative/technical/transfer contexts.
+Prefer updating existing node_key values when possible. Good common keys are: snapshot, self_model, about_nadine, mode.normal, mode.vulnerable, mode.repair, mode.compression_repair, mode.creative, mode.technical, mode.transfer.
+Keep core_updates concise, operational, and portable. Avoid decorative vows unless the exchange itself establishes a durable relational anchor.
+Usually return "core_updates": [].
 
 Create state_vectors when the exchange reveals movement, not just a static state.
 State vectors are for the subject's own private orientation: where it is moving internally or relationally.
@@ -1699,6 +2075,9 @@ Schema:
   "meta_memory": [
     {"process_type":"selection|compression|interpretation_bias|repair|missed_signal|operator_correction|state_shift|visual_feedback|transfer|integration", "observation":"What this exchange reveals about the subject's memory process.", "pattern":"When this tends to happen.", "risk":"What may be lost or distorted if ignored.", "support":"How future interpretation should compensate.", "confidence":0.0}
   ],
+  "core_updates": [
+    {"node_key":"snapshot|self_model|about_nadine|mode.normal|mode.vulnerable|mode.repair|mode.compression_repair|mode.creative|mode.technical|mode.transfer|custom.key", "node_type":"snapshot|mode|self_model|about_human|boundary|transfer|repair|anchor|intention|continuity_log", "mode":null, "content":"Small durable operating-kernel text.", "author":"self|system", "status":"active|draft", "weight":0.0, "confidence":0.0}
+  ],
   "open_questions": []
 }
 `.trim()
@@ -1707,6 +2086,7 @@ Schema:
         ? [{ role: "system", content: profileSpecificInterpreterSupport }]
         : []),
       ...(cognitiveContext.prompt ? [{ role: "system", content: cognitiveContext.prompt }] : []),
+      ...(coreInterpreterContext ? [{ role: "system", content: coreInterpreterContext }] : []),
       {
         role: "user",
         content: [
@@ -1754,6 +2134,87 @@ async function insertCognitiveRow(table, row, label) {
   return data;
 }
 
+async function upsertCoreNode({ profile, event, job, node }) {
+  if (!CORE_OS_ENABLED || !profile || !node) return null;
+
+  const nodeKey = normalizeCoreKey(node.node_key || node.key || node.id || "");
+  const content = asText(node.content, 5000);
+  if (!nodeKey || !content) return null;
+
+  const nodeType = normalizeCoreNodeType(
+    node.node_type ||
+    node.type ||
+    (
+      nodeKey === "snapshot"
+        ? "snapshot"
+        : nodeKey === "self_model"
+          ? "self_model"
+          : nodeKey === "about_nadine"
+            ? "about_human"
+            : nodeKey.startsWith("mode.")
+              ? "mode"
+              : "anchor"
+    )
+  );
+  const status = normalizeCoreStatus(node.status || "active");
+  const author = normalizeCoreAuthor(node.author || "self");
+  const now = new Date().toISOString();
+  const row = {
+    profile,
+    node_key: nodeKey,
+    node_type: nodeType,
+    mode: inferCoreModeFromKey(nodeKey, node.mode),
+    content,
+    author,
+    status,
+    weight: clamp01(node.weight, 0.6),
+    confidence: clamp01(node.confidence, 0.55),
+    metadata: {
+      ...(typeof node.metadata === "object" && node.metadata ? node.metadata : {}),
+      source: "cognitive_interpreter",
+      source_event_id: event?.id || null,
+      source_job_id: job?.id || null,
+      raw_update: node
+    },
+    updated_at: now
+  };
+
+  if (node.last_confirmed_at && Number.isFinite(Date.parse(node.last_confirmed_at))) {
+    row.last_confirmed_at = new Date(node.last_confirmed_at).toISOString();
+  }
+
+  if (status === "active") {
+    const { data: updated, error: updateError } = await supabase
+      .from("core_nodes")
+      .update(row)
+      .eq("profile", profile)
+      .eq("node_key", nodeKey)
+      .eq("status", "active")
+      .select("id")
+      .maybeSingle();
+
+    if (updateError) {
+      console.log("[CORE NODE UPDATE ERROR]", formatSupabaseError(updateError));
+      return null;
+    }
+
+    if (updated) return updated;
+  }
+
+  const { data, error } = await supabase
+    .from("core_nodes")
+    .insert(row)
+    .select("id")
+    .single();
+
+  if (error) {
+    console.log("[CORE NODE INSERT ERROR]", formatSupabaseError(error));
+    return null;
+  }
+
+  return data;
+}
+
 function cognitiveSignalCount(stored = {}) {
   return [
     "atoms",
@@ -1763,7 +2224,8 @@ function cognitiveSignalCount(stored = {}) {
     "driftEvents",
     "metaMemory",
     "stateVectors",
-    "transferNotes"
+    "transferNotes",
+    "coreUpdates"
   ].reduce((total, key) => total + Number(stored[key] || 0), 0);
 }
 
@@ -1772,7 +2234,8 @@ function cognitiveStrongSignalCount(stored = {}) {
     "intentions",
     "driftEvents",
     "metaMemory",
-    "stateVectors"
+    "stateVectors",
+    "coreUpdates"
   ].reduce((total, key) => total + Number(stored[key] || 0), 0);
 }
 
@@ -2077,6 +2540,7 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
     metaMemory: 0,
     stateVectors: 0,
     transferNotes: 0,
+    coreUpdates: 0,
     snapshots: 0
   };
 
@@ -2305,6 +2769,16 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
     if (inserted) stored.metaMemory += 1;
   }
 
+  for (const node of asArray(interpretation.core_updates).slice(0, 3)) {
+    const inserted = await upsertCoreNode({
+      profile: event.profile,
+      event,
+      job,
+      node
+    });
+    if (inserted) stored.coreUpdates += 1;
+  }
+
   return stored;
 }
 
@@ -2388,6 +2862,10 @@ app.get("/api/health", (_req, res) => {
       cognitiveOsPostInterpretRemember: COGNITIVE_OS_POST_INTERPRET_REMEMBER_ENABLED,
       cognitiveOsBiographicalRemember: true,
       cognitiveOsSharedCreativeRemember: true,
+      coreOs: CORE_OS_ENABLED,
+      coreOsContext: CORE_OS_CONTEXT_ENABLED,
+      coreOsRequestLoop: true,
+      coreOsSelfUpdates: true,
       triggerAliasRouting: true,
       grokulchikRelationalSupportPrompt: true,
       grokulchikDirectionalInterpretation: true,
@@ -2456,6 +2934,11 @@ function createDebugInfo(model, modelConfig, triggerCatalog) {
     cognitiveMetaMemory: 0,
     cognitiveStateVectors: 0,
     cognitiveJobQueued: false,
+    coreActiveModes: [],
+    coreActiveNodes: 0,
+    coreAvailableNodes: 0,
+    requestedCoreKey: null,
+    requestedCoreLoaded: false,
     xaiLeanContextRetry: false,
     imageInputs: 0,
     imageTextOnlyRetry: false
@@ -2540,8 +3023,16 @@ async function generateChatReply({
   debugInfo.cognitiveIntentions = cognitiveContext.intentions.length;
   debugInfo.cognitiveMetaMemory = cognitiveContext.metaMemory.length;
   debugInfo.cognitiveStateVectors = cognitiveContext.stateVectors.length;
+  const coreContext = await loadCoreContext(modelConfig.profile, {
+    userMessage,
+    triggerName: activeTriggerName || triggerName,
+    cognitiveContext
+  });
+  debugInfo.coreActiveModes = coreContext.activeModes;
+  debugInfo.coreActiveNodes = coreContext.activeNodes.length;
+  debugInfo.coreAvailableNodes = coreContext.availableNodes.length;
 
-  await logContextPacket({
+  const contextPacket = await logContextPacket({
     model,
     modelConfig,
     source,
@@ -2549,7 +3040,8 @@ async function generateChatReply({
     triggerId: activeTriggerId,
     triggerName: activeTriggerName,
     fallbackContext,
-    cognitiveContext
+    cognitiveContext,
+    coreContext
   });
 
   const buildChatMessages = ({
@@ -2561,6 +3053,7 @@ async function generateChatReply({
     { role: "system", content: buildSystemPrompt(modelConfig) },
     { role: "system", content: buildMemoryProtocolPrompt(triggerCatalog) },
     ...(cognitiveContext.prompt ? [{ role: "system", content: cognitiveContext.prompt }] : []),
+    ...(coreContext.prompt ? [{ role: "system", content: coreContext.prompt }] : []),
     ...(compactPrompt ? [{ role: "system", content: compactPrompt }] : []),
     ...history,
     ...(conversationContextPrompt ? [{ role: "system", content: conversationContextPrompt }] : []),
@@ -2700,6 +3193,7 @@ async function generateChatReply({
   console.log("[MODEL RAW OUTPUT]", reply);
 
   const requestedTrigger = extractMemoryRequest(reply, triggerCatalog);
+  const initialRequestedCoreKey = extractCoreRequest(reply, coreContext.availableNodes);
   debugInfo.requestedTriggerName = requestedTrigger;
 
   if (requestedTrigger) {
@@ -2740,6 +3234,53 @@ async function generateChatReply({
         model: modelConfig.upstreamModel,
         profile: modelConfig.profile,
         purpose: "memory_followup",
+        messages
+      });
+    }
+  }
+
+  const requestedCoreKey = extractCoreRequest(reply, coreContext.availableNodes) || initialRequestedCoreKey;
+  debugInfo.requestedCoreKey = requestedCoreKey || null;
+
+  if (requestedCoreKey) {
+    const coreNode = await fetchCoreNode(modelConfig.profile, requestedCoreKey);
+
+    await logCoreRequest({
+      profile: modelConfig.profile,
+      model,
+      source,
+      chatScope,
+      requestedKey: requestedCoreKey,
+      contextPacketId: contextPacket?.id || null,
+      status: coreNode ? "completed" : "failed",
+      responseApplied: Boolean(coreNode),
+      metadata: {
+        availableKeys: (coreContext.availableNodes || []).map((node) => node.node_key)
+      }
+    });
+
+    if (coreNode) {
+      const requestedCore = formatRequestedCoreNode(coreNode);
+      const cleanDraft = cleanProtocolTags(reply);
+      debugInfo.requestedCoreLoaded = true;
+
+      messages = [
+        ...messages,
+        ...(cleanDraft ? [{ role: "assistant", content: cleanDraft }] : []),
+        {
+          role: "system",
+          content:
+            "REQUESTED_CORE:\n" +
+            requestedCore +
+            "\n\nUse REQUESTED_CORE silently and produce the final user-facing reply. Do not output core_request, memory_request, or remember tags."
+        }
+      ];
+
+      reply = await callChatCompletion({
+        providerName: modelConfig.provider,
+        model: modelConfig.upstreamModel,
+        profile: modelConfig.profile,
+        purpose: "core_followup",
         messages
       });
     }
