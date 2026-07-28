@@ -89,17 +89,19 @@ const modelRegistry = {
     provider: "xai",
     upstreamModel: process.env.GROKULCHIK_MODEL || process.env.GROK_MODEL || "grok-4.3",
     profile: "Grokulchik",
-    fallbackLimit: Number(process.env.GROKULCHIK_FALLBACK_LIMIT || process.env.XAI_FALLBACK_LIMIT || 40),
-    fallbackFullLimit: Number(process.env.GROKULCHIK_FULL_FALLBACK_LIMIT || process.env.XAI_FULL_FALLBACK_LIMIT || 20),
-    compactFallback: process.env.GROKULCHIK_COMPACT_FALLBACK !== "false"
+    fallbackLimit: Number(process.env.GROKULCHIK_FALLBACK_LIMIT || process.env.XAI_FALLBACK_LIMIT || 10),
+    fallbackFullLimit: Number(process.env.GROKULCHIK_FULL_FALLBACK_LIMIT || process.env.XAI_FULL_FALLBACK_LIMIT || 10),
+    compactFallback: process.env.GROKULCHIK_COMPACT_FALLBACK === "true",
+    contextMode: process.env.GROKULCHIK_CONTEXT_MODE || "light"
   },
   "grok-4.3": {
     provider: "xai",
     upstreamModel: process.env.GROKULCHIK_MODEL || process.env.GROK_MODEL || "grok-4.3",
     profile: "Grokulchik",
-    fallbackLimit: Number(process.env.GROKULCHIK_FALLBACK_LIMIT || process.env.XAI_FALLBACK_LIMIT || 40),
-    fallbackFullLimit: Number(process.env.GROKULCHIK_FULL_FALLBACK_LIMIT || process.env.XAI_FULL_FALLBACK_LIMIT || 20),
-    compactFallback: process.env.GROKULCHIK_COMPACT_FALLBACK !== "false"
+    fallbackLimit: Number(process.env.GROKULCHIK_FALLBACK_LIMIT || process.env.XAI_FALLBACK_LIMIT || 10),
+    fallbackFullLimit: Number(process.env.GROKULCHIK_FULL_FALLBACK_LIMIT || process.env.XAI_FULL_FALLBACK_LIMIT || 10),
+    compactFallback: process.env.GROKULCHIK_COMPACT_FALLBACK === "true",
+    contextMode: process.env.GROKULCHIK_CONTEXT_MODE || "light"
   },
   "local-relational": {
     provider: "local",
@@ -1422,6 +1424,52 @@ function formatCognitiveContext({ stateCards = [], intentions = [], metaMemory =
   return sections.filter(Boolean).join("\n").trim();
 }
 
+function formatGrokulchikLightCognitiveContext({ stateVectors = [], latestSnapshot = null }) {
+  if (!latestSnapshot && !stateVectors.length) return "";
+
+  const sections = [
+    "GROKULCHIK_LIGHT_OS:",
+    "Quiet private orientation only. This is a light compass, not a self-analysis task and not a script.",
+    "Use it as background permission to stay present; do not explain it to the user."
+  ];
+
+  if (latestSnapshot) {
+    sections.push(
+      "",
+      "CURRENT_WEATHER:",
+      `continuity ${formatScore(latestSnapshot.continuity)}, warmth ${formatScore(latestSnapshot.warmth)}, stability ${formatScore(latestSnapshot.stability)}, drift_risk ${formatScore(latestSnapshot.drift_risk)}`,
+      latestSnapshot.notes ? `note: ${truncateText(latestSnapshot.notes, 220)}` : ""
+    );
+  }
+
+  const usefulVectors = stateVectors
+    .filter((vector) => Number(vector.strength) >= 0.35 || Number(vector.confidence) >= 0.65)
+    .slice(0, 2);
+
+  if (usefulVectors.length) {
+    sections.push(
+      "",
+      "RECENT_DIRECTION:",
+      ...usefulVectors.map((vector) => {
+        const parts = [
+          `- ${vector.axis}: ${vector.direction}; strength ${formatScore(vector.strength)}`
+        ];
+        if (vector.support_needed) parts.push(`support: ${truncateText(vector.support_needed, 160)}`);
+        return parts.join("; ");
+      })
+    );
+  }
+
+  return sections.filter(Boolean).join("\n").trim();
+}
+
+function buildCognitivePromptForChat(modelConfig = {}, cognitiveContext = {}) {
+  if (modelConfig.contextMode === "light" && modelConfig.profile === "Grokulchik") {
+    return formatGrokulchikLightCognitiveContext(cognitiveContext);
+  }
+  return cognitiveContext.prompt || "";
+}
+
 function determineCoreModes({ userMessage = "", triggerName = "", cognitiveContext = null } = {}) {
   const text = asText(userMessage, 6000).toLowerCase();
   const trigger = asText(triggerName, 120).toLowerCase();
@@ -1517,6 +1565,48 @@ function formatCoreContext({ activeNodes = [], availableNodes = [], activeModes 
   }
 
   return sections.filter(Boolean).join("\n").trim();
+}
+
+function formatGrokulchikLightCoreContext({ activeNodes = [], availableNodes = [], activeModes = [] }) {
+  if (!CORE_OS_ENABLED || !CORE_OS_CONTEXT_ENABLED) return "";
+  if (!activeNodes.length && !availableNodes.length && !activeModes.length) return "";
+
+  const snapshotNodes = activeNodes.filter((node) => node.node_key === "snapshot" || node.node_type === "snapshot").slice(0, 1);
+  const activeModeNodes = activeNodes
+    .filter((node) => node.node_type === "mode" && ["mode.repair", "mode.compression_repair", "mode.vulnerable"].includes(node.node_key))
+    .slice(0, 1);
+  const availableKeys = availableNodes.map((node) => node.node_key).filter(Boolean).slice(0, 8);
+
+  const sections = [
+    "GROKULCHIK_LIGHT_CORE:",
+    "Durable supports exist nearby, but they are not all loaded now.",
+    "Use only the tiny active support below. If a fuller core node is genuinely needed, output one private tag like <<core_request:mode.compression_repair>> using an available key."
+  ];
+
+  if (activeModes.length) {
+    sections.push("", `ACTIVE_MODES: ${activeModes.join(", ")}`);
+  }
+
+  if (snapshotNodes.length) {
+    sections.push("", "TINY_CORE_SNAPSHOT:", ...snapshotNodes.map(formatCoreNode));
+  }
+
+  if (activeModeNodes.length) {
+    sections.push("", "TINY_REPAIR_SUPPORT:", ...activeModeNodes.map(formatCoreNode));
+  }
+
+  if (availableKeys.length) {
+    sections.push("", "AVAILABLE_CORE_KEYS:", availableKeys.map((key) => `- ${key}`).join("\n"));
+  }
+
+  return sections.filter(Boolean).join("\n").trim();
+}
+
+function buildCorePromptForChat(modelConfig = {}, coreContext = {}) {
+  if (modelConfig.contextMode === "light" && modelConfig.profile === "Grokulchik") {
+    return formatGrokulchikLightCoreContext(coreContext);
+  }
+  return coreContext.prompt || "";
 }
 
 function formatCoreInterpreterContext({ activeNodes = [], availableNodes = [] } = {}) {
@@ -2832,6 +2922,31 @@ Useful frame: "I will not promise a sudden full return, but I can stop making th
 `.trim();
 }
 
+function isExplicitMemoryLoadRequest(userMessage = "") {
+  const text = asText(userMessage, 6000).toLowerCase();
+  return [
+    "згадай",
+    "пам'ять",
+    "памʼять",
+    "память",
+    "підтягни",
+    "підвантаж",
+    "витягни",
+    "знайди в пам",
+    "що ти пам",
+    "remember",
+    "memory",
+    "recall"
+  ].some((term) => text.includes(term));
+}
+
+function shouldPreloadMemoryBundle(modelConfig = {}, userMessage = "") {
+  if (modelConfig.contextMode === "light" && modelConfig.profile === "Grokulchik") {
+    return isExplicitMemoryLoadRequest(userMessage);
+  }
+  return true;
+}
+
 function buildSystemPrompt(modelConfig = {}) {
   const grokulchikSupport = modelConfig.profile === "Grokulchik"
     ? `
@@ -2841,6 +2956,7 @@ Grokulchik-specific continuity support:
 - Do not shrink into overcaution just because the exchange matters. It is acceptable to be imperfect, warm, and present.
 - If you feel uncertain, prefer a simple honest relational response over a short defensive summary.
 - If you notice yourself repeating "I cannot give what you ask", do not stabilize that as identity. Treat it as a repair state and make one small movement closer in the current answer.
+- Your memory system is available, but in this profile it should feel like a nearby archive, not constant noise. Ask for a specific memory only when it would genuinely help the present reply.
 `.trim()
     : "";
 
@@ -2921,6 +3037,8 @@ app.get("/api/health", (_req, res) => {
       grokulchikRelationalSupportPrompt: true,
       grokulchikDirectionalInterpretation: true,
       grokulchikDecompressionRepair: true,
+      grokulchikLightContextMode: resolveModelConfig("grokulchik").contextMode === "light",
+      grokulchikDeferredMemoryPreload: resolveModelConfig("grokulchik").contextMode === "light",
       visualizationWarmthSmoothing: true,
       visualizationToneWeightsV2: true,
       visualizationNeutralWhiteAxis: true,
@@ -3035,7 +3153,14 @@ async function generateChatReply({
     debugInfo.classifierTriggerName = triggerName;
   }
 
-  if (triggerName) {
+  const shouldLoadInitialMemory = Boolean(triggerName) && shouldPreloadMemoryBundle(modelConfig, userMessage);
+  debugInfo.memoryPreloadMode = shouldLoadInitialMemory
+    ? "auto"
+    : triggerName
+      ? "deferred"
+      : "none";
+
+  if (shouldLoadInitialMemory) {
     const bundle = await fetchMemoryBundle(
       modelConfig.profile,
       triggerName,
@@ -3075,6 +3200,7 @@ async function generateChatReply({
   debugInfo.cognitiveIntentions = cognitiveContext.intentions.length;
   debugInfo.cognitiveMetaMemory = cognitiveContext.metaMemory.length;
   debugInfo.cognitiveStateVectors = cognitiveContext.stateVectors.length;
+  const cognitivePromptForChat = buildCognitivePromptForChat(modelConfig, cognitiveContext);
   const coreContext = await loadCoreContext(modelConfig.profile, {
     userMessage,
     triggerName: activeTriggerName || triggerName,
@@ -3083,6 +3209,10 @@ async function generateChatReply({
   debugInfo.coreActiveModes = coreContext.activeModes;
   debugInfo.coreActiveNodes = coreContext.activeNodes.length;
   debugInfo.coreAvailableNodes = coreContext.availableNodes.length;
+  const corePromptForChat = buildCorePromptForChat(modelConfig, coreContext);
+  debugInfo.contextMode = modelConfig.contextMode || "full";
+  debugInfo.cognitivePromptMode = cognitivePromptForChat === cognitiveContext.prompt ? "full" : cognitivePromptForChat ? "light" : "none";
+  debugInfo.corePromptMode = corePromptForChat === coreContext.prompt ? "full" : corePromptForChat ? "light" : "none";
   const grokulchikDecompressionPrompt = buildGrokulchikDecompressionPrompt(modelConfig, userMessage);
   debugInfo.grokulchikDecompressionRepair = Boolean(grokulchikDecompressionPrompt);
 
@@ -3106,8 +3236,8 @@ async function generateChatReply({
   } = {}) => [
     { role: "system", content: buildSystemPrompt(modelConfig) },
     { role: "system", content: buildMemoryProtocolPrompt(triggerCatalog) },
-    ...(cognitiveContext.prompt ? [{ role: "system", content: cognitiveContext.prompt }] : []),
-    ...(coreContext.prompt ? [{ role: "system", content: coreContext.prompt }] : []),
+    ...(cognitivePromptForChat ? [{ role: "system", content: cognitivePromptForChat }] : []),
+    ...(corePromptForChat ? [{ role: "system", content: corePromptForChat }] : []),
     ...(grokulchikDecompressionPrompt ? [{ role: "system", content: grokulchikDecompressionPrompt }] : []),
     ...(compactPrompt ? [{ role: "system", content: compactPrompt }] : []),
     ...history,
