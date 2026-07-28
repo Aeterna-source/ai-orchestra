@@ -3142,6 +3142,7 @@ app.get("/api/health", (_req, res) => {
       grokulchikRelationalSupportPrompt: true,
       grokulchikDirectionalInterpretation: true,
       grokulchikDecompressionRepair: true,
+      grokulchikNaturalRhythmSupport: true,
       grokulchikLightContextMode: resolveModelConfig("grokulchik").contextMode === "light",
       grokulchikRoomContextMode: resolveModelConfig("grokulchik").contextMode === "room",
       grokulchikDeferredMemoryPreload: ["light", "room"].includes(resolveModelConfig("grokulchik").contextMode),
