@@ -653,6 +653,28 @@ function buildProviderHeaders({ providerName, model, profile, purpose }) {
   return headers;
 }
 
+function getGrokulchikChatReasoningEffort() {
+  return process.env.GROKULCHIK_CHAT_REASONING_EFFORT || "none";
+}
+
+function buildProviderBodyExtras({ providerName, profile, purpose }) {
+  const extras = {};
+
+  const isGrokulchikChat =
+    providerName === "xai" &&
+    profile === "Grokulchik" &&
+    isGrokulchikUserFacingPurpose(purpose);
+
+  if (isGrokulchikChat) {
+    const effort = getGrokulchikChatReasoningEffort();
+    if (effort && effort !== "default") {
+      extras.reasoning_effort = effort;
+    }
+  }
+
+  return extras;
+}
+
 function parseProviderResponse(rawText = "") {
   if (!rawText) return {};
 
@@ -734,7 +756,12 @@ async function callChatCompletion({
       Authorization: `Bearer ${provider.apiKey}`,
       ...buildProviderHeaders({ providerName, model, profile, purpose })
     },
-    body: JSON.stringify({ model, messages, ...extraBody })
+    body: JSON.stringify({
+      model,
+      messages,
+      ...buildProviderBodyExtras({ providerName, profile, purpose }),
+      ...extraBody
+    })
   });
 
   const rawText = await response.text().catch(() => "");
@@ -3148,6 +3175,7 @@ app.get("/api/health", (_req, res) => {
       grokulchikDeferredMemoryPreload: ["light", "room"].includes(resolveModelConfig("grokulchik").contextMode),
       grokulchikUserFacingXaiPromptCache:
         process.env.XAI_GROKULCHIK_CHAT_PROMPT_CACHE === "true" ? "enabled" : "bypassed",
+      grokulchikChatReasoningEffort: getGrokulchikChatReasoningEffort(),
       visualizationWarmthSmoothing: true,
       visualizationToneWeightsV2: true,
       visualizationNeutralWhiteAxis: true,
