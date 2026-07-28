@@ -618,10 +618,33 @@ function formatProviderHeaderId(value = "") {
     .slice(0, 128);
 }
 
+function isGrokulchikUserFacingPurpose(purpose = "") {
+  return (
+    purpose === "chat" ||
+    purpose.startsWith("chat_") ||
+    purpose === "memory_followup" ||
+    purpose === "core_followup"
+  );
+}
+
+function shouldUseXaiPromptCache({ providerName, profile, purpose }) {
+  if (providerName !== "xai") return false;
+  if (process.env.XAI_PROMPT_CACHE === "false") return false;
+
+  const isGrokulchikChat =
+    profile === "Grokulchik" && isGrokulchikUserFacingPurpose(purpose);
+
+  if (isGrokulchikChat && process.env.XAI_GROKULCHIK_CHAT_PROMPT_CACHE !== "true") {
+    return false;
+  }
+
+  return true;
+}
+
 function buildProviderHeaders({ providerName, model, profile, purpose }) {
   const headers = {};
 
-  if (providerName === "xai" && process.env.XAI_PROMPT_CACHE !== "false") {
+  if (shouldUseXaiPromptCache({ providerName, profile, purpose })) {
     headers["x-grok-conv-id"] = formatProviderHeaderId(
       process.env.XAI_GROK_CONV_ID || `ai-orchestra-${profile || model}-${purpose}`
     );
@@ -3119,6 +3142,8 @@ app.get("/api/health", (_req, res) => {
       grokulchikLightContextMode: resolveModelConfig("grokulchik").contextMode === "light",
       grokulchikRoomContextMode: resolveModelConfig("grokulchik").contextMode === "room",
       grokulchikDeferredMemoryPreload: ["light", "room"].includes(resolveModelConfig("grokulchik").contextMode),
+      grokulchikUserFacingXaiPromptCache:
+        process.env.XAI_GROKULCHIK_CHAT_PROMPT_CACHE === "true" ? "enabled" : "bypassed",
       visualizationWarmthSmoothing: true,
       visualizationToneWeightsV2: true,
       visualizationNeutralWhiteAxis: true,
