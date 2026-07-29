@@ -657,6 +657,37 @@ function getGrokulchikChatReasoningEffort() {
   return process.env.GROKULCHIK_CHAT_REASONING_EFFORT || "none";
 }
 
+function getGrokulchikResponsesMaxOutputTokens() {
+  return Number(
+    process.env.GROKULCHIK_RESPONSES_MAX_OUTPUT_TOKENS ||
+      process.env.XAI_RESPONSES_MAX_OUTPUT_TOKENS ||
+      2000
+  );
+}
+
+function shouldStoreXaiResponses() {
+  return process.env.XAI_RESPONSES_STORE === "true";
+}
+
+function messagesContainImageInput(messages = []) {
+  return messages.some((message) =>
+    Array.isArray(message?.content) &&
+    message.content.some((part) =>
+      part?.type === "image_url" ||
+      part?.type === "input_image" ||
+      Boolean(part?.image_url)
+    )
+  );
+}
+
+function shouldUseXaiResponsesApi({ providerName, profile, purpose, messages = [] }) {
+  if (providerName !== "xai") return false;
+  if (profile !== "Grokulchik") return false;
+  if (!isGrokulchikUserFacingPurpose(purpose)) return false;
+  if (messagesContainImageInput(messages)) return false;
+  return process.env.GROKULCHIK_USE_RESPONSES_API !== "false";
+}
+
 function buildProviderBodyExtras({ providerName, profile, purpose }) {
   const extras = {};
 
@@ -673,6 +704,43 @@ function buildProviderBodyExtras({ providerName, profile, purpose }) {
   }
 
   return extras;
+}
+
+function buildXaiResponsesBody({ model, messages, extraBody = {}, providerBodyExtras = {} }) {
+  return {
+    model,
+    input: messages,
+    store: shouldStoreXaiResponses(),
+    max_output_tokens: getGrokulchikResponsesMaxOutputTokens(),
+    ...providerBodyExtras,
+    ...extraBody
+  };
+}
+
+function extractResponsesText(data = {}) {
+  if (typeof data.output_text === "string" && data.output_text.trim()) {
+    return data.output_text.trim();
+  }
+
+  const parts = [];
+  for (const item of data.output || []) {
+    if (typeof item?.content === "string") {
+      parts.push(item.content);
+      continue;
+    }
+
+    if (!Array.isArray(item?.content)) continue;
+
+    for (const content of item.content) {
+      if (typeof content?.text === "string") {
+        parts.push(content.text);
+      } else if (typeof content?.content === "string") {
+        parts.push(content.content);
+      }
+    }
+  }
+
+  return parts.join("\n").trim();
 }
 
 function parseProviderResponse(rawText = "") {
@@ -739,7 +807,8 @@ async function callChatCompletion({
   messages,
   extraBody = {},
   purpose = "chat",
-  profile = null
+  profile = null,
+  forceChatCompletions = false
 }) {
   const provider = providers[providerName];
   if (!provider) {
@@ -749,19 +818,32 @@ async function callChatCompletion({
     throw new Error(`Missing API key for provider: ${providerName}`);
   }
 
-  const response = await fetch(`${provider.baseUrl}/chat/completions`, {
+  const useResponsesApi = !forceChatCompletions && shouldUseXaiResponsesApi({
+    providerName,
+    profile,
+    purpose,
+    messages
+  });
+  const providerBodyExtras = buildProviderBodyExtras({ providerName, profile, purpose });
+  const endpointPath = useResponsesApi ? "/responses" : "/chat/completions";
+  const requestBody = useResponsesApi
+    ? buildXaiResponsesBody({ model, messages, extraBody, providerBodyExtras })
+    : {
+        model,
+        messages,
+        ...providerBodyExtras,
+        ...extraBody
+      };
+  const logPurpose = useResponsesApi ? `${purpose}_responses` : purpose;
+
+  const response = await fetch(`${provider.baseUrl}${endpointPath}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${provider.apiKey}`,
       ...buildProviderHeaders({ providerName, model, profile, purpose })
     },
-    body: JSON.stringify({
-      model,
-      messages,
-      ...buildProviderBodyExtras({ providerName, profile, purpose }),
-      ...extraBody
-    })
+    body: JSON.stringify(requestBody)
   });
 
   const rawText = await response.text().catch(() => "");
@@ -773,7 +855,7 @@ async function callChatCompletion({
       providerName,
       model,
       profile,
-      purpose,
+      purpose: logPurpose,
       ok: false,
       status: response.status,
       error: errorText && errorText !== "{}" ? errorText : rawErrorText || `HTTP ${response.status}`,
@@ -787,6 +869,19 @@ async function callChatCompletion({
       error: data?.error || data,
       rawText: rawErrorText
     });
+
+    if (useResponsesApi && process.env.XAI_RESPONSES_CHAT_FALLBACK !== "false") {
+      return callChatCompletion({
+        providerName,
+        model,
+        messages,
+        extraBody,
+        purpose: `${purpose}_chat_fallback`,
+        profile,
+        forceChatCompletions: true
+      });
+    }
+
     throw createProviderError({
       providerName,
       model,
@@ -796,12 +891,14 @@ async function callChatCompletion({
     });
   }
 
-  const reply = data?.choices?.[0]?.message?.content || "";
+  const reply = useResponsesApi
+    ? extractResponsesText(data)
+    : data?.choices?.[0]?.message?.content || "";
   await logAiCall({
     providerName,
     model,
     profile,
-    purpose,
+    purpose: logPurpose,
     ok: true,
     status: response.status,
     usage: data?.usage,
@@ -3176,6 +3273,10 @@ app.get("/api/health", (_req, res) => {
       grokulchikUserFacingXaiPromptCache:
         process.env.XAI_GROKULCHIK_CHAT_PROMPT_CACHE === "true" ? "enabled" : "bypassed",
       grokulchikChatReasoningEffort: getGrokulchikChatReasoningEffort(),
+      grokulchikUserFacingXaiEndpoint:
+        process.env.GROKULCHIK_USE_RESPONSES_API === "false" ? "chat_completions" : "responses",
+      grokulchikResponsesStore: shouldStoreXaiResponses(),
+      grokulchikResponsesMaxOutputTokens: getGrokulchikResponsesMaxOutputTokens(),
       visualizationWarmthSmoothing: true,
       visualizationToneWeightsV2: true,
       visualizationNeutralWhiteAxis: true,
