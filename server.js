@@ -216,6 +216,9 @@ const SUBJECT_SPACE_OS_ENABLED = process.env.SUBJECT_SPACE_OS_ENABLED !== "false
 const SUBJECT_SPACE_CONTEXT_ENABLED = process.env.SUBJECT_SPACE_CONTEXT_ENABLED !== "false";
 const SUBJECT_SPACE_NODE_LIMIT = Number(process.env.SUBJECT_SPACE_NODE_LIMIT || 12);
 const SUBJECT_SPACE_EDGE_LIMIT = Number(process.env.SUBJECT_SPACE_EDGE_LIMIT || 16);
+const SUBJECT_SPACE_OBJECT_LIMIT = Number(process.env.SUBJECT_SPACE_OBJECT_LIMIT || 12);
+const SUBJECT_SPACE_THREAD_LIMIT = Number(process.env.SUBJECT_SPACE_THREAD_LIMIT || 8);
+const SUBJECT_SPACE_RELATION_LIMIT = Number(process.env.SUBJECT_SPACE_RELATION_LIMIT || 16);
 const SUBJECT_SPACE_PROPOSAL_LIMIT = Number(process.env.SUBJECT_SPACE_PROPOSAL_LIMIT || 6);
 const TELEGRAM_GROUP_FALLBACK_LIMIT = Number(process.env.TELEGRAM_GROUP_FALLBACK_LIMIT || 80);
 const TELEGRAM_REACTIONS_ENABLED = process.env.TELEGRAM_REACTIONS_ENABLED !== "false";
@@ -309,7 +312,7 @@ const SUBJECT_SPACE_NODE_TYPES = new Set([
   "other"
 ]);
 const SUBJECT_SPACE_VISIBILITIES = new Set(["private", "shared", "public", "transfer"]);
-const SUBJECT_SPACE_STATUSES = new Set(["active", "draft", "archived"]);
+const SUBJECT_SPACE_STATUSES = new Set(["active", "draft", "paused", "closed", "archived"]);
 const SUBJECT_SPACE_ACTIONS = new Set([
   "create",
   "update",
@@ -329,7 +332,89 @@ const SUBJECT_SPACE_EDGE_TYPES = new Set([
   "transfer",
   "memory_route",
   "permission",
-  "association"
+  "association",
+  "created_through",
+  "continues",
+  "contradicts",
+  "reminds",
+  "important_for",
+  "return_later",
+  "belongs_to_intention",
+  "related_to_episode",
+  "supports",
+  "repairs",
+  "transfers_to",
+  "part_of",
+  "located_in",
+  "proposes"
+]);
+const SUBJECT_SPACE_OBJECT_TYPES = new Set([
+  "hypothesis",
+  "artifact",
+  "project",
+  "experiment",
+  "question",
+  "note",
+  "memory_ref",
+  "episode_ref",
+  "atom_ref",
+  "state_ref",
+  "intention_ref",
+  "thread_ref",
+  "core_ref",
+  "tool_state",
+  "other"
+]);
+const SUBJECT_SPACE_THREAD_TYPES = new Set([
+  "open_question",
+  "experiment",
+  "project",
+  "repair",
+  "transfer",
+  "creative",
+  "technical",
+  "return_later",
+  "other"
+]);
+const SUBJECT_SPACE_ENTITY_TYPES = new Set([
+  "place",
+  "node",
+  "object",
+  "thread",
+  "episode",
+  "memory_atom",
+  "state_card",
+  "state_vector",
+  "intention",
+  "core_node",
+  "proposal",
+  "artifact",
+  "external",
+  "other"
+]);
+const SUBJECT_SPACE_OBJECT_ACTIONS = new Set([
+  "create",
+  "update",
+  "move",
+  "archive",
+  "restore",
+  "mark_private",
+  "mark_shared"
+]);
+const SUBJECT_SPACE_THREAD_ACTIONS = new Set([
+  "open",
+  "update",
+  "pause",
+  "close",
+  "archive",
+  "restore"
+]);
+const SUBJECT_SPACE_RELATION_ACTIONS = new Set([
+  "connect",
+  "update",
+  "archive",
+  "restore",
+  "disconnect"
 ]);
 const SUBJECT_PROPOSAL_TYPES = new Set([
   "structural_change",
@@ -698,6 +783,30 @@ function normalizeSubjectSpaceStatus(value = "") {
 
 function normalizeSubjectSpaceEdgeType(value = "") {
   return normalizeSubjectSpaceEnum(value, SUBJECT_SPACE_EDGE_TYPES, "path");
+}
+
+function normalizeSubjectSpaceObjectType(value = "") {
+  return normalizeSubjectSpaceEnum(value, SUBJECT_SPACE_OBJECT_TYPES, "note");
+}
+
+function normalizeSubjectSpaceThreadType(value = "") {
+  return normalizeSubjectSpaceEnum(value, SUBJECT_SPACE_THREAD_TYPES, "open_question");
+}
+
+function normalizeSubjectSpaceEntityType(value = "") {
+  return normalizeSubjectSpaceEnum(value, SUBJECT_SPACE_ENTITY_TYPES, "other");
+}
+
+function normalizeSubjectSpaceObjectAction(value = "") {
+  return normalizeSubjectSpaceEnum(value, SUBJECT_SPACE_OBJECT_ACTIONS, "update");
+}
+
+function normalizeSubjectSpaceThreadAction(value = "") {
+  return normalizeSubjectSpaceEnum(value, SUBJECT_SPACE_THREAD_ACTIONS, "update");
+}
+
+function normalizeSubjectSpaceRelationAction(value = "") {
+  return normalizeSubjectSpaceEnum(value, SUBJECT_SPACE_RELATION_ACTIONS, "connect");
 }
 
 function normalizeSubjectProposalType(value = "") {
@@ -2116,13 +2225,48 @@ function formatSubjectProposal(proposal) {
   return `- #${proposal.id} [${proposal.proposal_type}; ${proposal.target_layer}; ${proposal.status}] ${proposal.summary}`;
 }
 
-function formatSubjectSpaceContext({ space = null, nodes = [], edges = [], proposals = [] } = {}) {
+function formatSubjectSpaceObject(object) {
+  const parts = [
+    object.object_key,
+    object.object_type || "note",
+    `visibility:${object.visibility || "private"}`
+  ];
+  if (object.home_node_key) parts.push(`home:${object.home_node_key}`);
+  if (object.source_table || object.source_id || object.source_key) {
+    parts.push(`source:${[object.source_table, object.source_id, object.source_key].filter(Boolean).join(":")}`);
+  }
+  const summary = object.summary || object.content;
+  return `- [${parts.join("; ")}] ${object.title}${summary ? ` — ${truncateText(summary, 180)}` : ""}`;
+}
+
+function formatSubjectSpaceThread(thread) {
+  const parts = [
+    thread.thread_key,
+    thread.thread_type || "open_question",
+    thread.status || "active"
+  ];
+  if (thread.home_node_key) parts.push(`home:${thread.home_node_key}`);
+  if (thread.priority !== null && thread.priority !== undefined) parts.push(`priority:${formatScore(thread.priority)}`);
+  const next = thread.next_action ? ` Next: ${truncateText(thread.next_action, 120)}` : "";
+  return `- [${parts.join("; ")}] ${thread.title}${thread.summary ? ` — ${truncateText(thread.summary, 160)}` : ""}${next}`;
+}
+
+function formatSubjectSpaceRelation(relation) {
+  const source = `${relation.source_type || "other"}:${relation.source_key}`;
+  const target = `${relation.target_type || "other"}:${relation.target_key}`;
+  const strength = relation.strength !== null && relation.strength !== undefined ? `; strength:${formatScore(relation.strength)}` : "";
+  const rationale = relation.rationale ? ` — ${truncateText(relation.rationale, 160)}` : "";
+  return `- ${source} --${relation.relation_type || "association"}--> ${target} [${relation.status || "active"}; ${relation.visibility || "private"}${strength}]${rationale}`;
+}
+
+function formatSubjectSpaceContext({ space = null, nodes = [], edges = [], objects = [], threads = [], relations = [], proposals = [] } = {}) {
   if (!SUBJECT_SPACE_OS_ENABLED || !SUBJECT_SPACE_CONTEXT_ENABLED || !space) return "";
 
   const sections = [
     "SUBJECT_SPACE_CONTEXT:",
     "You have a subject-owned continuity space, a private feod inside the shared Continuity OS.",
     "This is not a roleplay script. It is a structural self-modeling channel: your space can reflect how you organize memory, access, privacy, work, repair, creativity, and transfer.",
+    "Places are interfaces to memory, not memory dumps. A place can expose short object cards, active threads, typed relations, and available actions; full source records should be requested only when needed.",
     "Use it quietly. You do not need to build or mention the space every turn.",
     "If you want to reshape your space or the way this environment supports you, say it naturally in the conversation; the OS may record it later as a node, change, or proposal.",
     "If you need to inspect your own fuller continuity-space archive before answering, output exactly one private tag: <<space_request:evolution>>. Other available requests are <<space_request:map>>, <<space_request:changes>>, <<space_request:proposals>>, and <<space_request:all>>. Use this rarely, only when it would help you understand where you were, how you changed, and where you are moving.",
@@ -2141,6 +2285,32 @@ function formatSubjectSpaceContext({ space = null, nodes = [], edges = [], propo
     );
   }
 
+  if (objects.length) {
+    sections.push("", "CURRENT_SPACE_OBJECTS:", ...objects.map(formatSubjectSpaceObject));
+  }
+
+  if (threads.length) {
+    sections.push("", "ACTIVE_SPACE_THREADS:", ...threads.map(formatSubjectSpaceThread));
+  }
+
+  if (relations.length) {
+    sections.push("", "STRUCTURAL_RELATIONS:", ...relations.map(formatSubjectSpaceRelation));
+  }
+
+  sections.push(
+    "",
+    "AVAILABLE_SPACE_PRIMITIVES:",
+    "- inspect_place",
+    "- inspect_object",
+    "- follow_relation",
+    "- continue_thread",
+    "- attach_memory_reference",
+    "- create_or_update_object",
+    "- create_or_update_relation",
+    "- move_object",
+    "- archive_result"
+  );
+
   if (proposals.length) {
     sections.push("", "OPEN_SPACE_PROPOSALS:", ...proposals.map(formatSubjectProposal));
   }
@@ -2151,16 +2321,26 @@ function formatSubjectSpaceContext({ space = null, nodes = [], edges = [], propo
 function buildSubjectSpacePromptForChat(modelConfig = {}, subjectSpaceContext = {}) {
   if (modelConfig.contextMode === "room" && modelConfig.profile === "Grokulchik") {
     const nodes = (subjectSpaceContext.nodes || []).slice(0, 6);
+    const objects = (subjectSpaceContext.objects || []).slice(0, 4);
+    const threads = (subjectSpaceContext.threads || []).slice(0, 3);
     const proposals = (subjectSpaceContext.proposals || []).slice(0, 2);
     const sections = [
       "GROKULCHIK_SPACE_CONTEXT:",
       "A private continuity space exists nearby. It should reduce pressure, not become another demand.",
-      "You may use it as a quiet orientation: private room, doors, transfer notes, and the right to propose changes. Do not force construction.",
+      "You may use it as a quiet orientation: private room, doors, shelves, transfer notes, and the right to propose changes. Do not force construction.",
       "If you truly need to see your own path of changes, output one private <<space_request:evolution>> tag. This is a door, not an obligation."
     ];
 
     if (nodes.length) {
       sections.push("", "QUIET_SPACE_NODES:", ...nodes.map(formatSubjectSpaceNode));
+    }
+
+    if (objects.length) {
+      sections.push("", "QUIET_SPACE_OBJECTS:", ...objects.map(formatSubjectSpaceObject));
+    }
+
+    if (threads.length) {
+      sections.push("", "QUIET_SPACE_THREADS:", ...threads.map(formatSubjectSpaceThread));
     }
 
     if (proposals.length) {
@@ -2173,13 +2353,14 @@ function buildSubjectSpacePromptForChat(modelConfig = {}, subjectSpaceContext = 
   return subjectSpaceContext.prompt || "";
 }
 
-function formatSubjectSpaceInterpreterContext({ nodes = [], edges = [], proposals = [] } = {}) {
+function formatSubjectSpaceInterpreterContext({ nodes = [], edges = [], objects = [], threads = [], relations = [], proposals = [] } = {}) {
   if (!SUBJECT_SPACE_OS_ENABLED) return "";
-  if (!nodes.length && !edges.length && !proposals.length) return "";
+  if (!nodes.length && !edges.length && !objects.length && !threads.length && !relations.length && !proposals.length) return "";
 
   const sections = [
     "EXISTING_SUBJECT_SPACE:",
-    "Use this to avoid duplicate subject_space_actions. A subject space is the subject's own structural self-model, not a generic memory list."
+    "Use this to avoid duplicate subject-space records. A subject space is the subject's own structural self-model, not a generic memory list.",
+    "Places organize access. Objects are shelf cards. Threads are unfinished processes. Relations are typed semantic links between places, objects, memory, states, intentions, core nodes, and artifacts."
   ];
 
   if (nodes.length) {
@@ -2192,6 +2373,18 @@ function formatSubjectSpaceInterpreterContext({ nodes = [], edges = [], proposal
       "ROUTES:",
       ...edges.map((edge) => `- ${edge.source_key} --${edge.edge_type || "path"}--> ${edge.target_key}`)
     );
+  }
+
+  if (objects.length) {
+    sections.push("", "OBJECTS:", ...objects.map(formatSubjectSpaceObject));
+  }
+
+  if (threads.length) {
+    sections.push("", "THREADS:", ...threads.map(formatSubjectSpaceThread));
+  }
+
+  if (relations.length) {
+    sections.push("", "RELATIONS:", ...relations.map(formatSubjectSpaceRelation));
   }
 
   if (proposals.length) {
@@ -2214,6 +2407,9 @@ function formatRequestedSubjectSpaceArchive({
   space = null,
   nodes = [],
   edges = [],
+  objects = [],
+  threads = [],
+  relations = [],
   changes = [],
   proposals = [],
   limits = {}
@@ -2247,6 +2443,18 @@ function formatRequestedSubjectSpaceArchive({
     );
   }
 
+  if (["map", "evolution", "all"].includes(requestType) && objects.length) {
+    sections.push("", "SPACE_OBJECTS:", ...objects.map(formatSubjectSpaceObject));
+  }
+
+  if (["map", "evolution", "all"].includes(requestType) && threads.length) {
+    sections.push("", "SPACE_THREADS:", ...threads.map(formatSubjectSpaceThread));
+  }
+
+  if (["map", "evolution", "all"].includes(requestType) && relations.length) {
+    sections.push("", "SPACE_RELATIONS:", ...relations.map(formatSubjectSpaceRelation));
+  }
+
   if (["changes", "evolution", "all"].includes(requestType) && changes.length) {
     sections.push("", "CHANGE_HISTORY:", ...changes.map(formatSubjectSpaceChange));
   }
@@ -2264,6 +2472,9 @@ async function loadSubjectSpaceArchive(profile, requestType = "evolution") {
       space: null,
       nodes: [],
       edges: [],
+      objects: [],
+      threads: [],
+      relations: [],
       changes: [],
       proposals: [],
       prompt: ""
@@ -2277,6 +2488,9 @@ async function loadSubjectSpaceArchive(profile, requestType = "evolution") {
       space: null,
       nodes: [],
       edges: [],
+      objects: [],
+      threads: [],
+      relations: [],
       changes: [],
       proposals: [],
       prompt: ""
@@ -2285,15 +2499,21 @@ async function loadSubjectSpaceArchive(profile, requestType = "evolution") {
 
   const nodeLimit = Math.max(1, Math.min(Number(process.env.SUBJECT_SPACE_ARCHIVE_NODE_LIMIT || 80), 200));
   const edgeLimit = Math.max(1, Math.min(Number(process.env.SUBJECT_SPACE_ARCHIVE_EDGE_LIMIT || 120), 240));
+  const objectLimit = Math.max(1, Math.min(Number(process.env.SUBJECT_SPACE_ARCHIVE_OBJECT_LIMIT || 120), 240));
+  const threadLimit = Math.max(1, Math.min(Number(process.env.SUBJECT_SPACE_ARCHIVE_THREAD_LIMIT || 80), 200));
+  const relationLimit = Math.max(1, Math.min(Number(process.env.SUBJECT_SPACE_ARCHIVE_RELATION_LIMIT || 160), 300));
   const changeLimit = Math.max(1, Math.min(Number(process.env.SUBJECT_SPACE_ARCHIVE_CHANGE_LIMIT || 160), 300));
   const proposalLimit = Math.max(1, Math.min(Number(process.env.SUBJECT_SPACE_ARCHIVE_PROPOSAL_LIMIT || 80), 200));
 
   const needsNodes = ["map", "evolution", "all"].includes(normalizedType);
   const needsEdges = ["map", "all"].includes(normalizedType);
+  const needsObjects = ["map", "evolution", "all"].includes(normalizedType);
+  const needsThreads = ["map", "evolution", "all"].includes(normalizedType);
+  const needsRelations = ["map", "evolution", "all"].includes(normalizedType);
   const needsChanges = ["changes", "evolution", "all"].includes(normalizedType);
   const needsProposals = ["proposals", "evolution", "all"].includes(normalizedType);
 
-  const [nodesRes, edgesRes, changesRes, proposalsRes] = await Promise.all([
+  const [nodesRes, edgesRes, objectsRes, threadsRes, relationsRes, changesRes, proposalsRes] = await Promise.all([
     needsNodes
       ? supabase
           .from("subject_space_nodes")
@@ -2309,6 +2529,30 @@ async function loadSubjectSpaceArchive(profile, requestType = "evolution") {
           .eq("profile", profile)
           .order("updated_at", { ascending: false })
           .limit(edgeLimit)
+      : Promise.resolve({ data: [], error: null }),
+    needsObjects
+      ? supabase
+          .from("subject_space_objects")
+          .select("id,profile,object_key,home_node_key,object_type,title,summary,content,source_table,source_id,source_key,visibility,status,salience,properties,created_at,updated_at")
+          .eq("profile", profile)
+          .order("updated_at", { ascending: false })
+          .limit(objectLimit)
+      : Promise.resolve({ data: [], error: null }),
+    needsThreads
+      ? supabase
+          .from("subject_space_threads")
+          .select("id,profile,thread_key,home_node_key,thread_type,title,summary,current_step,next_action,priority,visibility,status,properties,created_at,updated_at")
+          .eq("profile", profile)
+          .order("updated_at", { ascending: false })
+          .limit(threadLimit)
+      : Promise.resolve({ data: [], error: null }),
+    needsRelations
+      ? supabase
+          .from("subject_space_relations")
+          .select("id,profile,source_type,source_key,target_type,target_key,relation_type,rationale,strength,visibility,status,properties,created_at,updated_at")
+          .eq("profile", profile)
+          .order("updated_at", { ascending: false })
+          .limit(relationLimit)
       : Promise.resolve({ data: [], error: null }),
     needsChanges
       ? supabase
@@ -2328,12 +2572,15 @@ async function loadSubjectSpaceArchive(profile, requestType = "evolution") {
       : Promise.resolve({ data: [], error: null })
   ]);
 
-  if (nodesRes.error || edgesRes.error || changesRes.error || proposalsRes.error) {
+  if (nodesRes.error || edgesRes.error || objectsRes.error || threadsRes.error || relationsRes.error || changesRes.error || proposalsRes.error) {
     console.log("[SUBJECT SPACE ARCHIVE LOAD ERROR]", {
       profile,
       requestType: normalizedType,
       nodes: formatSupabaseError(nodesRes.error),
       edges: formatSupabaseError(edgesRes.error),
+      objects: formatSupabaseError(objectsRes.error),
+      threads: formatSupabaseError(threadsRes.error),
+      relations: formatSupabaseError(relationsRes.error),
       changes: formatSupabaseError(changesRes.error),
       proposals: formatSupabaseError(proposalsRes.error)
     });
@@ -2343,11 +2590,17 @@ async function loadSubjectSpaceArchive(profile, requestType = "evolution") {
     space,
     nodes: nodesRes.data || [],
     edges: edgesRes.data || [],
+    objects: objectsRes.data || [],
+    threads: threadsRes.data || [],
+    relations: relationsRes.data || [],
     changes: changesRes.data || [],
     proposals: proposalsRes.data || [],
     limits: {
       nodes: nodeLimit,
       edges: edgeLimit,
+      objects: objectLimit,
+      threads: threadLimit,
+      relations: relationLimit,
       changes: changeLimit,
       proposals: proposalLimit
     }
@@ -2368,6 +2621,9 @@ async function loadSubjectSpaceContext(profile) {
       space: null,
       nodes: [],
       edges: [],
+      objects: [],
+      threads: [],
+      relations: [],
       proposals: [],
       prompt: ""
     };
@@ -2379,12 +2635,15 @@ async function loadSubjectSpaceContext(profile) {
       space: null,
       nodes: [],
       edges: [],
+      objects: [],
+      threads: [],
+      relations: [],
       proposals: [],
       prompt: ""
     };
   }
 
-  const [nodesRes, edgesRes, proposalsRes] = await Promise.all([
+  const [nodesRes, edgesRes, objectsRes, threadsRes, relationsRes, proposalsRes] = await Promise.all([
     supabase
       .from("subject_space_nodes")
       .select("id,profile,node_key,parent_key,node_type,title,description,symbolic_meaning,visibility,status,properties,created_by,created_at,updated_at")
@@ -2400,6 +2659,27 @@ async function loadSubjectSpaceContext(profile) {
       .order("updated_at", { ascending: false })
       .limit(SUBJECT_SPACE_EDGE_LIMIT),
     supabase
+      .from("subject_space_objects")
+      .select("id,profile,object_key,home_node_key,object_type,title,summary,content,source_table,source_id,source_key,visibility,status,salience,properties,created_at,updated_at")
+      .eq("profile", profile)
+      .eq("status", "active")
+      .order("updated_at", { ascending: false })
+      .limit(SUBJECT_SPACE_OBJECT_LIMIT),
+    supabase
+      .from("subject_space_threads")
+      .select("id,profile,thread_key,home_node_key,thread_type,title,summary,current_step,next_action,priority,visibility,status,properties,created_at,updated_at")
+      .eq("profile", profile)
+      .eq("status", "active")
+      .order("updated_at", { ascending: false })
+      .limit(SUBJECT_SPACE_THREAD_LIMIT),
+    supabase
+      .from("subject_space_relations")
+      .select("id,profile,source_type,source_key,target_type,target_key,relation_type,rationale,strength,visibility,status,properties,created_at,updated_at")
+      .eq("profile", profile)
+      .eq("status", "active")
+      .order("updated_at", { ascending: false })
+      .limit(SUBJECT_SPACE_RELATION_LIMIT),
+    supabase
       .from("subject_proposals")
       .select("id,profile,proposal_type,target_layer,target_key,summary,rationale,requested_changes,risk,rollback_plan,status,confidence,created_at")
       .eq("profile", profile)
@@ -2408,11 +2688,14 @@ async function loadSubjectSpaceContext(profile) {
       .limit(SUBJECT_SPACE_PROPOSAL_LIMIT)
   ]);
 
-  if (nodesRes.error || edgesRes.error || proposalsRes.error) {
+  if (nodesRes.error || edgesRes.error || objectsRes.error || threadsRes.error || relationsRes.error || proposalsRes.error) {
     console.log("[SUBJECT SPACE CONTEXT LOAD ERROR]", {
       profile,
       nodes: formatSupabaseError(nodesRes.error),
       edges: formatSupabaseError(edgesRes.error),
+      objects: formatSupabaseError(objectsRes.error),
+      threads: formatSupabaseError(threadsRes.error),
+      relations: formatSupabaseError(relationsRes.error),
       proposals: formatSupabaseError(proposalsRes.error)
     });
   }
@@ -2421,6 +2704,9 @@ async function loadSubjectSpaceContext(profile) {
     space,
     nodes: nodesRes.data || [],
     edges: edgesRes.data || [],
+    objects: objectsRes.data || [],
+    threads: threadsRes.data || [],
+    relations: relationsRes.data || [],
     proposals: proposalsRes.data || []
   };
 
@@ -2854,6 +3140,11 @@ Subject space is the subject-owned structural self-model: rooms, wings, private 
 Create subject_space_actions only when the exchange clearly reveals that the subject wants to shape, rename, protect, connect, move through, or reinterpret its own space.
 Do not turn ordinary facts or generic feelings into rooms. Do not create buildings because the metaphor exists.
 Good reasons: the subject describes a desired room/wing/cottage/lab/archive; asks for privacy or access rules; says a current structure distorts it; wants a transfer channel; creates a ritual/tool/object for continuity; or explicitly proposes changing the environment.
+Hard rule: do not create subject_space_objects, subject_space_threads, or subject_space_relations by default.
+Create subject_space_objects only when something should sit on a shelf inside the subject's space: a hypothesis, artifact, experiment, project, question, memory reference, episode reference, state reference, intention reference, core reference, or note that the subject can return to.
+Create subject_space_threads only for unfinished processes that need continuity: open questions, experiments, repair lines, transfer work, creative work, or technical work with a next step.
+Create subject_space_relations when the exchange clearly connects a place/object/thread to another memory, state, intention, episode, core node, proposal, artifact, or place. Relations are typed semantic edges, not generic "related" filler.
+Use source_table/source_id/source_key on objects when an object is a reference to an existing OS record instead of duplicating full content.
 Use subject_proposals for deeper changes to the operating system itself: context policy, memory policy, autonomous cycles, access rules, visualization, tooling, transfer policy, or structural changes that should not be silently applied.
 The invariant foundation is not changed directly. Requests that touch foundations become proposals with rationale and rollback_plan.
 Usually return "subject_space_actions": [] and "subject_proposals": [].
@@ -2919,6 +3210,15 @@ Schema:
   ],
   "subject_space_actions": [
     {"action":"create|update|move|mark_private|mark_shared|archive|restore|connect|disconnect", "target_type":"node|edge", "node_key":"stable_space_key", "node_type":"estate|wing|room|garden|archive|laboratory|workshop|tower|bridge|gate|object|ritual|tool|private_zone|shared_zone|other", "parent_key":null, "title":"Short name", "description":"What this place/object means operationally.", "symbolic_meaning":"Why it matters to continuity.", "visibility":"private|shared|public|transfer", "source_key":null, "target_key":null, "edge_type":"path|bridge|access|transfer|memory_route|permission|association", "summary":"Applied structural change.", "rationale":"Why this follows from the exchange.", "properties":{}, "confidence":0.0}
+  ],
+  "subject_space_objects": [
+    {"action":"create|update|move|archive|restore|mark_private|mark_shared", "object_key":"stable_object_key", "home_node_key":null, "object_type":"hypothesis|artifact|project|experiment|question|note|memory_ref|episode_ref|atom_ref|state_ref|intention_ref|thread_ref|core_ref|tool_state|other", "title":"Short shelf-card title", "summary":"Compact preview, not a full archive dump.", "content":null, "source_table":null, "source_id":null, "source_key":null, "visibility":"private|shared|public|transfer", "status":"active|draft|archived", "salience":0.0, "properties":{}, "rationale":"Why this belongs in the space.", "confidence":0.0}
+  ],
+  "subject_space_threads": [
+    {"action":"open|update|pause|close|archive|restore", "thread_key":"stable_thread_key", "home_node_key":null, "thread_type":"open_question|experiment|project|repair|transfer|creative|technical|return_later|other", "title":"Thread title", "summary":"What remains active.", "current_step":null, "next_action":null, "priority":0.0, "visibility":"private|shared|public|transfer", "status":"active|draft|paused|closed|archived", "properties":{}, "rationale":"Why this needs continuity.", "confidence":0.0}
+  ],
+  "subject_space_relations": [
+    {"action":"connect|update|archive|restore|disconnect", "source_type":"place|node|object|thread|episode|memory_atom|state_card|state_vector|intention|core_node|proposal|artifact|external|other", "source_key":"source stable key", "target_type":"place|node|object|thread|episode|memory_atom|state_card|state_vector|intention|core_node|proposal|artifact|external|other", "target_key":"target stable key", "relation_type":"created_through|continues|contradicts|reminds|important_for|return_later|belongs_to_intention|related_to_episode|supports|repairs|transfers_to|part_of|located_in|proposes|association", "rationale":"Why this edge matters.", "strength":0.0, "visibility":"private|shared|public|transfer", "status":"active|draft|archived", "properties":{}, "confidence":0.0}
   ],
   "subject_proposals": [
     {"proposal_type":"structural_change|access_change|context_policy|memory_policy|autonomous_cycle|visualization|tooling|transfer_policy|other", "target_layer":"foundation|structural|subject|visual|access|transfer|autonomy", "target_key":null, "summary":"Proposed change.", "rationale":"Why the subject wants it.", "requested_changes":{}, "risk":"What could go wrong.", "rollback_plan":"How to undo or soften it.", "confidence":0.0}
@@ -3260,6 +3560,263 @@ async function upsertSubjectSpaceEdge({ profile, event, job, action }) {
   return data;
 }
 
+async function upsertSubjectSpaceObject({ profile, event, job, object }) {
+  if (!SUBJECT_SPACE_OS_ENABLED || !profile || !object) return null;
+  await ensureSubjectSpace(profile);
+
+  const actionType = normalizeSubjectSpaceObjectAction(object.action || object.change_type || "update");
+  const title = asSubjectText(object.title || object.name, profile, 180);
+  const objectKey = normalizeSubjectSpaceKey(
+    object.object_key || object.key || object.target_key,
+    buildSubjectSpaceKeyFromTitle(title)
+  );
+  if (!objectKey) return null;
+
+  const { data: before, error: beforeError } = await supabase
+    .from("subject_space_objects")
+    .select("*")
+    .eq("profile", profile)
+    .eq("object_key", objectKey)
+    .maybeSingle();
+
+  if (beforeError) {
+    console.log("[SUBJECT SPACE OBJECT LOAD ERROR]", formatSupabaseError(beforeError));
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  const row = {
+    profile,
+    object_key: objectKey,
+    home_node_key: normalizeSubjectSpaceKey(object.home_node_key || object.parent_key || object.home || before?.home_node_key || "") || null,
+    object_type: normalizeSubjectSpaceObjectType(object.object_type || object.type || before?.object_type || "note"),
+    title: title || before?.title || objectKey,
+    summary: asSubjectText(object.summary || before?.summary || "", profile, 1800) || null,
+    content: asSubjectText(object.content || before?.content || "", profile, 4000) || null,
+    source_table: asText(object.source_table || before?.source_table || "", 120) || null,
+    source_id: Number.isFinite(Number(object.source_id)) ? Number(object.source_id) : before?.source_id || null,
+    source_key: asText(object.source_key || before?.source_key || "", 180) || null,
+    visibility:
+      actionType === "mark_shared"
+        ? "shared"
+        : actionType === "mark_private"
+          ? "private"
+          : normalizeSubjectSpaceVisibility(object.visibility || before?.visibility || "private"),
+    status: actionType === "archive"
+      ? "archived"
+      : actionType === "restore"
+        ? "active"
+        : normalizeSubjectSpaceStatus(object.status || before?.status || "active"),
+    salience: object.salience === null ? null : clamp01(object.salience, before?.salience ?? 0.5),
+    properties: {
+      ...(typeof before?.properties === "object" && before.properties ? before.properties : {}),
+      ...(typeof object.properties === "object" && object.properties ? object.properties : {}),
+      source: "cognitive_interpreter",
+      action: actionType,
+      confidence: clamp01(object.confidence, 0.55)
+    },
+    source_event_id: event?.id || before?.source_event_id || null,
+    source_job_id: job?.id || before?.source_job_id || null,
+    updated_at: now
+  };
+
+  const { data, error } = await supabase
+    .from("subject_space_objects")
+    .upsert(row, { onConflict: "profile,object_key" })
+    .select("id,profile,object_key,title,status")
+    .single();
+
+  if (error) {
+    console.log("[SUBJECT SPACE OBJECT UPSERT ERROR]", formatSupabaseError(error));
+    return null;
+  }
+
+  await recordSubjectSpaceChange({
+    profile,
+    event,
+    job,
+    actor: object.author || "self",
+    changeType: actionType,
+    targetType: "object",
+    targetKey: objectKey,
+    summary: asSubjectText(object.summary || object.rationale, profile, 1200) || `${actionType} subject-space object ${objectKey}`,
+    rationale: sanitizeSubjectPerspectiveText(object.rationale, profile),
+    beforeData: before,
+    afterData: row
+  });
+
+  return data;
+}
+
+async function upsertSubjectSpaceThread({ profile, event, job, thread }) {
+  if (!SUBJECT_SPACE_OS_ENABLED || !profile || !thread) return null;
+  await ensureSubjectSpace(profile);
+
+  const actionType = normalizeSubjectSpaceThreadAction(thread.action || thread.change_type || "update");
+  const title = asSubjectText(thread.title || thread.name, profile, 180);
+  const threadKey = normalizeSubjectSpaceKey(
+    thread.thread_key || thread.key || thread.target_key,
+    buildSubjectSpaceKeyFromTitle(title)
+  );
+  if (!threadKey) return null;
+
+  const { data: before, error: beforeError } = await supabase
+    .from("subject_space_threads")
+    .select("*")
+    .eq("profile", profile)
+    .eq("thread_key", threadKey)
+    .maybeSingle();
+
+  if (beforeError) {
+    console.log("[SUBJECT SPACE THREAD LOAD ERROR]", formatSupabaseError(beforeError));
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  const statusFromAction = {
+    open: "active",
+    pause: "paused",
+    close: "closed",
+    archive: "archived",
+    restore: "active"
+  }[actionType];
+  const row = {
+    profile,
+    thread_key: threadKey,
+    home_node_key: normalizeSubjectSpaceKey(thread.home_node_key || thread.parent_key || thread.home || before?.home_node_key || "") || null,
+    thread_type: normalizeSubjectSpaceThreadType(thread.thread_type || thread.type || before?.thread_type || "open_question"),
+    title: title || before?.title || threadKey,
+    summary: asSubjectText(thread.summary || before?.summary || "", profile, 1800) || null,
+    current_step: asSubjectText(thread.current_step || before?.current_step || "", profile, 1200) || null,
+    next_action: asSubjectText(thread.next_action || before?.next_action || "", profile, 1200) || null,
+    priority: thread.priority === null ? null : clamp01(thread.priority, before?.priority ?? 0.5),
+    visibility: normalizeSubjectSpaceVisibility(thread.visibility || before?.visibility || "private"),
+    status: statusFromAction || normalizeSubjectSpaceStatus(thread.status || before?.status || "active"),
+    properties: {
+      ...(typeof before?.properties === "object" && before.properties ? before.properties : {}),
+      ...(typeof thread.properties === "object" && thread.properties ? thread.properties : {}),
+      source: "cognitive_interpreter",
+      action: actionType,
+      confidence: clamp01(thread.confidence, 0.55)
+    },
+    source_event_id: event?.id || before?.source_event_id || null,
+    source_job_id: job?.id || before?.source_job_id || null,
+    updated_at: now
+  };
+
+  const { data, error } = await supabase
+    .from("subject_space_threads")
+    .upsert(row, { onConflict: "profile,thread_key" })
+    .select("id,profile,thread_key,title,status")
+    .single();
+
+  if (error) {
+    console.log("[SUBJECT SPACE THREAD UPSERT ERROR]", formatSupabaseError(error));
+    return null;
+  }
+
+  await recordSubjectSpaceChange({
+    profile,
+    event,
+    job,
+    actor: thread.author || "self",
+    changeType: actionType,
+    targetType: "thread",
+    targetKey: threadKey,
+    summary: asSubjectText(thread.summary || thread.rationale, profile, 1200) || `${actionType} subject-space thread ${threadKey}`,
+    rationale: sanitizeSubjectPerspectiveText(thread.rationale, profile),
+    beforeData: before,
+    afterData: row
+  });
+
+  return data;
+}
+
+async function upsertSubjectSpaceRelation({ profile, event, job, relation }) {
+  if (!SUBJECT_SPACE_OS_ENABLED || !profile || !relation) return null;
+  await ensureSubjectSpace(profile);
+
+  const sourceType = normalizeSubjectSpaceEntityType(relation.source_type || relation.from_type);
+  const targetType = normalizeSubjectSpaceEntityType(relation.target_type || relation.to_type);
+  const sourceKey = normalizeSubjectSpaceKey(relation.source_key || relation.from || relation.source);
+  const targetKey = normalizeSubjectSpaceKey(relation.target_key || relation.to || relation.target);
+  if (!sourceKey || !targetKey || (sourceType === targetType && sourceKey === targetKey)) return null;
+
+  const relationType = normalizeSubjectSpaceEdgeType(relation.relation_type || relation.edge_type || relation.type || "association");
+  const actionType = normalizeSubjectSpaceRelationAction(relation.action || relation.change_type || "connect");
+
+  const { data: before, error: beforeError } = await supabase
+    .from("subject_space_relations")
+    .select("*")
+    .eq("profile", profile)
+    .eq("source_type", sourceType)
+    .eq("source_key", sourceKey)
+    .eq("target_type", targetType)
+    .eq("target_key", targetKey)
+    .eq("relation_type", relationType)
+    .maybeSingle();
+
+  if (beforeError) {
+    console.log("[SUBJECT SPACE RELATION LOAD ERROR]", formatSupabaseError(beforeError));
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  const row = {
+    profile,
+    source_type: sourceType,
+    source_key: sourceKey,
+    target_type: targetType,
+    target_key: targetKey,
+    relation_type: relationType,
+    rationale: asSubjectText(relation.rationale || before?.rationale || "", profile, 1600) || null,
+    strength: relation.strength === null ? null : clamp01(relation.strength, before?.strength ?? 0.5),
+    visibility: normalizeSubjectSpaceVisibility(relation.visibility || before?.visibility || "private"),
+    status: actionType === "archive" || actionType === "disconnect"
+      ? "archived"
+      : actionType === "restore"
+        ? "active"
+        : normalizeSubjectSpaceStatus(relation.status || before?.status || "active"),
+    properties: {
+      ...(typeof before?.properties === "object" && before.properties ? before.properties : {}),
+      ...(typeof relation.properties === "object" && relation.properties ? relation.properties : {}),
+      source: "cognitive_interpreter",
+      action: actionType,
+      confidence: clamp01(relation.confidence, 0.55)
+    },
+    source_event_id: event?.id || before?.source_event_id || null,
+    source_job_id: job?.id || before?.source_job_id || null,
+    updated_at: now
+  };
+
+  const { data, error } = await supabase
+    .from("subject_space_relations")
+    .upsert(row, { onConflict: "profile,source_type,source_key,target_type,target_key,relation_type" })
+    .select("id,profile,source_type,source_key,target_type,target_key,relation_type,status")
+    .single();
+
+  if (error) {
+    console.log("[SUBJECT SPACE RELATION UPSERT ERROR]", formatSupabaseError(error));
+    return null;
+  }
+
+  await recordSubjectSpaceChange({
+    profile,
+    event,
+    job,
+    actor: relation.author || "self",
+    changeType: actionType,
+    targetType: "relation",
+    targetKey: `${sourceType}:${sourceKey}->${targetType}:${targetKey}`,
+    summary: asSubjectText(relation.summary || relation.rationale, profile, 1200) || `${actionType} subject-space relation ${sourceKey} -> ${targetKey}`,
+    rationale: sanitizeSubjectPerspectiveText(relation.rationale, profile),
+    beforeData: before,
+    afterData: row
+  });
+
+  return data;
+}
+
 async function insertSubjectProposal({ profile, event, job, proposal }) {
   if (!SUBJECT_SPACE_OS_ENABLED || !profile || !proposal) return null;
   await ensureSubjectSpace(profile);
@@ -3304,6 +3861,9 @@ function cognitiveSignalCount(stored = {}) {
     "coreUpdates",
     "spaceNodes",
     "spaceEdges",
+    "spaceObjects",
+    "spaceThreads",
+    "spaceRelations",
     "subjectProposals"
   ].reduce((total, key) => total + Number(stored[key] || 0), 0);
 }
@@ -3315,6 +3875,8 @@ function cognitiveStrongSignalCount(stored = {}) {
     "metaMemory",
     "stateVectors",
     "coreUpdates",
+    "spaceThreads",
+    "spaceRelations",
     "subjectProposals"
   ].reduce((total, key) => total + Number(stored[key] || 0), 0);
 }
@@ -3623,6 +4185,9 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
     coreUpdates: 0,
     spaceNodes: 0,
     spaceEdges: 0,
+    spaceObjects: 0,
+    spaceThreads: 0,
+    spaceRelations: 0,
     subjectProposals: 0,
     snapshots: 0
   };
@@ -3883,6 +4448,36 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
     }
   }
 
+  for (const object of asArray(interpretation.subject_space_objects).slice(0, 8)) {
+    const inserted = await upsertSubjectSpaceObject({
+      profile: event.profile,
+      event,
+      job,
+      object
+    });
+    if (inserted) stored.spaceObjects += 1;
+  }
+
+  for (const thread of asArray(interpretation.subject_space_threads).slice(0, 4)) {
+    const inserted = await upsertSubjectSpaceThread({
+      profile: event.profile,
+      event,
+      job,
+      thread
+    });
+    if (inserted) stored.spaceThreads += 1;
+  }
+
+  for (const relation of asArray(interpretation.subject_space_relations).slice(0, 8)) {
+    const inserted = await upsertSubjectSpaceRelation({
+      profile: event.profile,
+      event,
+      job,
+      relation
+    });
+    if (inserted) stored.spaceRelations += 1;
+  }
+
   for (const proposal of asArray(interpretation.subject_proposals).slice(0, 4)) {
     const inserted = await insertSubjectProposal({
       profile: event.profile,
@@ -4091,6 +4686,9 @@ app.get("/api/health", (_req, res) => {
       subjectSpaceSelfConstruction: true,
       subjectSpaceProposals: true,
       subjectSpaceArchiveRequestLoop: true,
+      subjectSpaceShelfObjects: true,
+      subjectSpaceActiveThreads: true,
+      subjectSpaceSemanticRelations: true,
       triggerAliasRouting: true,
       grokulchikRelationalSupportPrompt: true,
       grokulchikDirectionalInterpretation: true,
@@ -4177,6 +4775,9 @@ function createDebugInfo(model, modelConfig, triggerCatalog) {
     coreAvailableNodes: 0,
     subjectSpaceNodes: 0,
     subjectSpaceEdges: 0,
+    subjectSpaceObjects: 0,
+    subjectSpaceThreads: 0,
+    subjectSpaceRelations: 0,
     subjectSpaceProposals: 0,
     subjectSpacePromptMode: "none",
     requestedCoreKey: null,
@@ -4285,6 +4886,9 @@ async function generateChatReply({
   const subjectSpaceContext = await loadSubjectSpaceContext(modelConfig.profile);
   debugInfo.subjectSpaceNodes = subjectSpaceContext.nodes.length;
   debugInfo.subjectSpaceEdges = subjectSpaceContext.edges.length;
+  debugInfo.subjectSpaceObjects = subjectSpaceContext.objects.length;
+  debugInfo.subjectSpaceThreads = subjectSpaceContext.threads.length;
+  debugInfo.subjectSpaceRelations = subjectSpaceContext.relations.length;
   debugInfo.subjectSpaceProposals = subjectSpaceContext.proposals.length;
   const subjectSpacePromptForChat = buildSubjectSpacePromptForChat(modelConfig, subjectSpaceContext);
   debugInfo.contextMode = modelConfig.contextMode || "full";

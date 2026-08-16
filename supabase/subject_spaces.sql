@@ -50,6 +50,70 @@ create table if not exists public.subject_space_edges (
   unique(profile, source_key, target_key, edge_type)
 );
 
+create table if not exists public.subject_space_objects (
+  id bigserial primary key,
+  profile text not null references public.subject_spaces(profile) on delete cascade,
+  object_key text not null,
+  home_node_key text,
+  object_type text not null default 'note',
+  title text not null,
+  summary text,
+  content text,
+  source_table text,
+  source_id bigint,
+  source_key text,
+  visibility text not null default 'private',
+  status text not null default 'active',
+  salience numeric,
+  properties jsonb not null default '{}'::jsonb,
+  source_event_id bigint references public.os_events(id) on delete set null,
+  source_job_id bigint references public.os_jobs(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique(profile, object_key)
+);
+
+create table if not exists public.subject_space_threads (
+  id bigserial primary key,
+  profile text not null references public.subject_spaces(profile) on delete cascade,
+  thread_key text not null,
+  home_node_key text,
+  thread_type text not null default 'open_question',
+  title text not null,
+  summary text,
+  current_step text,
+  next_action text,
+  priority numeric,
+  visibility text not null default 'private',
+  status text not null default 'active',
+  properties jsonb not null default '{}'::jsonb,
+  source_event_id bigint references public.os_events(id) on delete set null,
+  source_job_id bigint references public.os_jobs(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique(profile, thread_key)
+);
+
+create table if not exists public.subject_space_relations (
+  id bigserial primary key,
+  profile text not null references public.subject_spaces(profile) on delete cascade,
+  source_type text not null,
+  source_key text not null,
+  target_type text not null,
+  target_key text not null,
+  relation_type text not null default 'association',
+  rationale text,
+  strength numeric,
+  visibility text not null default 'private',
+  status text not null default 'active',
+  properties jsonb not null default '{}'::jsonb,
+  source_event_id bigint references public.os_events(id) on delete set null,
+  source_job_id bigint references public.os_jobs(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique(profile, source_type, source_key, target_type, target_key, relation_type)
+);
+
 create table if not exists public.subject_space_changes (
   id bigserial primary key,
   profile text not null references public.subject_spaces(profile) on delete cascade,
@@ -96,6 +160,24 @@ create index if not exists subject_space_nodes_profile_visibility_idx
 create index if not exists subject_space_edges_profile_status_idx
   on public.subject_space_edges(profile, status, updated_at desc);
 
+create index if not exists subject_space_objects_profile_home_idx
+  on public.subject_space_objects(profile, home_node_key, status, updated_at desc);
+
+create index if not exists subject_space_objects_profile_type_idx
+  on public.subject_space_objects(profile, object_type, status);
+
+create index if not exists subject_space_threads_profile_home_idx
+  on public.subject_space_threads(profile, home_node_key, status, updated_at desc);
+
+create index if not exists subject_space_threads_profile_status_idx
+  on public.subject_space_threads(profile, status, priority desc, updated_at desc);
+
+create index if not exists subject_space_relations_profile_source_idx
+  on public.subject_space_relations(profile, source_type, source_key, status);
+
+create index if not exists subject_space_relations_profile_target_idx
+  on public.subject_space_relations(profile, target_type, target_key, status);
+
 create index if not exists subject_space_changes_profile_created_idx
   on public.subject_space_changes(profile, created_at desc);
 
@@ -105,6 +187,9 @@ create index if not exists subject_proposals_profile_status_idx
 alter table public.subject_spaces enable row level security;
 alter table public.subject_space_nodes enable row level security;
 alter table public.subject_space_edges enable row level security;
+alter table public.subject_space_objects enable row level security;
+alter table public.subject_space_threads enable row level security;
+alter table public.subject_space_relations enable row level security;
 alter table public.subject_space_changes enable row level security;
 alter table public.subject_proposals enable row level security;
 
