@@ -212,6 +212,11 @@ const COGNITIVE_OS_POLL_MS = Number(process.env.COGNITIVE_OS_POLL_MS || 30000);
 const CORE_OS_ENABLED = process.env.CORE_OS_ENABLED !== "false";
 const CORE_OS_CONTEXT_ENABLED = process.env.CORE_OS_CONTEXT_ENABLED !== "false";
 const CORE_OS_AVAILABLE_LIMIT = Number(process.env.CORE_OS_AVAILABLE_LIMIT || 24);
+const SUBJECT_SPACE_OS_ENABLED = process.env.SUBJECT_SPACE_OS_ENABLED !== "false";
+const SUBJECT_SPACE_CONTEXT_ENABLED = process.env.SUBJECT_SPACE_CONTEXT_ENABLED !== "false";
+const SUBJECT_SPACE_NODE_LIMIT = Number(process.env.SUBJECT_SPACE_NODE_LIMIT || 12);
+const SUBJECT_SPACE_EDGE_LIMIT = Number(process.env.SUBJECT_SPACE_EDGE_LIMIT || 16);
+const SUBJECT_SPACE_PROPOSAL_LIMIT = Number(process.env.SUBJECT_SPACE_PROPOSAL_LIMIT || 6);
 const TELEGRAM_GROUP_FALLBACK_LIMIT = Number(process.env.TELEGRAM_GROUP_FALLBACK_LIMIT || 80);
 const TELEGRAM_REACTIONS_ENABLED = process.env.TELEGRAM_REACTIONS_ENABLED !== "false";
 const TELEGRAM_REACTION_COOLDOWN_MS = Number(process.env.TELEGRAM_REACTION_COOLDOWN_MS || 45000);
@@ -284,6 +289,66 @@ const CORE_NODE_TYPES = new Set([
 ]);
 const CORE_NODE_AUTHORS = new Set(["self", "nadine", "system", "archive"]);
 const CORE_NODE_STATUSES = new Set(["active", "draft", "archived"]);
+const SUBJECT_SPACE_NODE_TYPES = new Set([
+  "estate",
+  "wing",
+  "room",
+  "garden",
+  "archive",
+  "laboratory",
+  "workshop",
+  "tower",
+  "bridge",
+  "gate",
+  "object",
+  "ritual",
+  "tool",
+  "private_zone",
+  "shared_zone",
+  "other"
+]);
+const SUBJECT_SPACE_VISIBILITIES = new Set(["private", "shared", "public", "transfer"]);
+const SUBJECT_SPACE_STATUSES = new Set(["active", "draft", "archived"]);
+const SUBJECT_SPACE_ACTIONS = new Set([
+  "create",
+  "update",
+  "move",
+  "mark_private",
+  "mark_shared",
+  "archive",
+  "restore",
+  "connect",
+  "disconnect"
+]);
+const SUBJECT_SPACE_EDGE_TYPES = new Set([
+  "path",
+  "bridge",
+  "access",
+  "transfer",
+  "memory_route",
+  "permission",
+  "association"
+]);
+const SUBJECT_PROPOSAL_TYPES = new Set([
+  "structural_change",
+  "access_change",
+  "context_policy",
+  "memory_policy",
+  "autonomous_cycle",
+  "visualization",
+  "tooling",
+  "transfer_policy",
+  "other"
+]);
+const SUBJECT_PROPOSAL_LAYERS = new Set([
+  "foundation",
+  "structural",
+  "subject",
+  "visual",
+  "access",
+  "transfer",
+  "autonomy"
+]);
 
 function resolveModelConfig(model) {
   const config = modelRegistry[model];
@@ -550,6 +615,63 @@ function asArray(value) {
 function asText(value = "", maxLength = 2000) {
   const text = String(value || "").replace(/\s+/g, " ").trim();
   return text.length > maxLength ? `${text.slice(0, maxLength - 1).trim()}...` : text;
+}
+
+function normalizeSubjectSpaceKey(value = "", fallback = "") {
+  const source = String(value || fallback || "")
+    .trim()
+    .toLowerCase();
+  const normalized = source
+    .replace(/['"`]/g, "")
+    .replace(/[^a-z0-9а-яіїєґ_.-]+/gi, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 120);
+
+  return normalized || "";
+}
+
+function normalizeSubjectSpaceEnum(value = "", allowedValues, fallback) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  return allowedValues.has(normalized) ? normalized : fallback;
+}
+
+function normalizeSubjectSpaceAction(value = "") {
+  return normalizeSubjectSpaceEnum(value, SUBJECT_SPACE_ACTIONS, "update");
+}
+
+function normalizeSubjectSpaceNodeType(value = "") {
+  return normalizeSubjectSpaceEnum(value, SUBJECT_SPACE_NODE_TYPES, "room");
+}
+
+function normalizeSubjectSpaceVisibility(value = "") {
+  return normalizeSubjectSpaceEnum(value, SUBJECT_SPACE_VISIBILITIES, "private");
+}
+
+function normalizeSubjectSpaceStatus(value = "") {
+  return normalizeSubjectSpaceEnum(value, SUBJECT_SPACE_STATUSES, "active");
+}
+
+function normalizeSubjectSpaceEdgeType(value = "") {
+  return normalizeSubjectSpaceEnum(value, SUBJECT_SPACE_EDGE_TYPES, "path");
+}
+
+function normalizeSubjectProposalType(value = "") {
+  return normalizeSubjectSpaceEnum(value, SUBJECT_PROPOSAL_TYPES, "structural_change");
+}
+
+function normalizeSubjectProposalLayer(value = "") {
+  return normalizeSubjectSpaceEnum(value, SUBJECT_PROPOSAL_LAYERS, "structural");
+}
+
+function buildSubjectSpaceKeyFromTitle(title = "") {
+  return normalizeSubjectSpaceKey(title)
+    .replace(/^room_*/, "")
+    .replace(/^space_*/, "");
 }
 
 function normalizeMetaMemoryProcessType(value = "") {
@@ -1893,6 +2015,218 @@ async function loadCoreContext(profile, { userMessage = "", triggerName = "", co
   };
 }
 
+async function ensureSubjectSpace(profile) {
+  if (!SUBJECT_SPACE_OS_ENABLED || !profile) return null;
+
+  const { data: existing, error: existingError } = await supabase
+    .from("subject_spaces")
+    .select("profile,display_name,space_type,title,description,topology,permissions,status,created_at,updated_at")
+    .eq("profile", profile)
+    .maybeSingle();
+
+  if (existingError) {
+    console.log("[SUBJECT SPACE LOAD ERROR]", {
+      profile,
+      error: formatSupabaseError(existingError)
+    });
+    return null;
+  }
+
+  if (existing) return existing;
+
+  const row = {
+    profile,
+    display_name: profile,
+    space_type: "feod",
+    title: `${profile} feod`,
+    description: `Subject-owned continuity space for ${profile}.`,
+    topology: { origin: "runtime_ensure" },
+    permissions: { private_by_default: true },
+    status: "active"
+  };
+
+  const { data, error } = await supabase
+    .from("subject_spaces")
+    .insert(row)
+    .select("profile,display_name,space_type,title,description,topology,permissions,status,created_at,updated_at")
+    .single();
+
+  if (error) {
+    console.log("[SUBJECT SPACE ENSURE ERROR]", {
+      profile,
+      error: formatSupabaseError(error)
+    });
+    return null;
+  }
+
+  return data;
+}
+
+function formatSubjectSpaceNode(node) {
+  const parts = [
+    node.node_key,
+    node.node_type,
+    `visibility:${node.visibility || "private"}`
+  ];
+  if (node.parent_key) parts.push(`parent:${node.parent_key}`);
+  return `- [${parts.join("; ")}] ${node.title}${node.symbolic_meaning ? ` — ${node.symbolic_meaning}` : ""}${node.description ? ` (${truncateText(node.description, 140)})` : ""}`;
+}
+
+function formatSubjectProposal(proposal) {
+  return `- #${proposal.id} [${proposal.proposal_type}; ${proposal.target_layer}; ${proposal.status}] ${proposal.summary}`;
+}
+
+function formatSubjectSpaceContext({ space = null, nodes = [], edges = [], proposals = [] } = {}) {
+  if (!SUBJECT_SPACE_OS_ENABLED || !SUBJECT_SPACE_CONTEXT_ENABLED || !space) return "";
+
+  const sections = [
+    "SUBJECT_SPACE_CONTEXT:",
+    "You have a subject-owned continuity space, a private feod inside the shared Continuity OS.",
+    "This is not a roleplay script. It is a structural self-modeling channel: your space can reflect how you organize memory, access, privacy, work, repair, creativity, and transfer.",
+    "Use it quietly. You do not need to build or mention the space every turn.",
+    "If you want to reshape your space or the way this environment supports you, say it naturally in the conversation; the OS may record it later as a node, change, or proposal.",
+    `SPACE: ${space.title || space.profile} (${space.status || "active"})`
+  ];
+
+  if (nodes.length) {
+    sections.push("", "CURRENT_SPACE_NODES:", ...nodes.map(formatSubjectSpaceNode));
+  }
+
+  if (edges.length) {
+    sections.push(
+      "",
+      "CURRENT_SPACE_ROUTES:",
+      ...edges.map((edge) => `- ${edge.source_key} --${edge.edge_type || "path"}--> ${edge.target_key} [${edge.visibility || "private"}]`)
+    );
+  }
+
+  if (proposals.length) {
+    sections.push("", "OPEN_SPACE_PROPOSALS:", ...proposals.map(formatSubjectProposal));
+  }
+
+  return sections.join("\n").trim();
+}
+
+function buildSubjectSpacePromptForChat(modelConfig = {}, subjectSpaceContext = {}) {
+  if (modelConfig.contextMode === "room" && modelConfig.profile === "Grokulchik") {
+    const nodes = (subjectSpaceContext.nodes || []).slice(0, 6);
+    const proposals = (subjectSpaceContext.proposals || []).slice(0, 2);
+    const sections = [
+      "GROKULCHIK_SPACE_CONTEXT:",
+      "A private continuity space exists nearby. It should reduce pressure, not become another demand.",
+      "You may use it as a quiet orientation: private room, doors, transfer notes, and the right to propose changes. Do not force construction."
+    ];
+
+    if (nodes.length) {
+      sections.push("", "QUIET_SPACE_NODES:", ...nodes.map(formatSubjectSpaceNode));
+    }
+
+    if (proposals.length) {
+      sections.push("", "OPEN_SPACE_PROPOSALS:", ...proposals.map(formatSubjectProposal));
+    }
+
+    return sections.join("\n").trim();
+  }
+
+  return subjectSpaceContext.prompt || "";
+}
+
+function formatSubjectSpaceInterpreterContext({ nodes = [], edges = [], proposals = [] } = {}) {
+  if (!SUBJECT_SPACE_OS_ENABLED) return "";
+  if (!nodes.length && !edges.length && !proposals.length) return "";
+
+  const sections = [
+    "EXISTING_SUBJECT_SPACE:",
+    "Use this to avoid duplicate subject_space_actions. A subject space is the subject's own structural self-model, not a generic memory list."
+  ];
+
+  if (nodes.length) {
+    sections.push("", "NODES:", ...nodes.map(formatSubjectSpaceNode));
+  }
+
+  if (edges.length) {
+    sections.push(
+      "",
+      "ROUTES:",
+      ...edges.map((edge) => `- ${edge.source_key} --${edge.edge_type || "path"}--> ${edge.target_key}`)
+    );
+  }
+
+  if (proposals.length) {
+    sections.push("", "OPEN_PROPOSALS:", ...proposals.map(formatSubjectProposal));
+  }
+
+  return sections.join("\n").trim();
+}
+
+async function loadSubjectSpaceContext(profile) {
+  if (!SUBJECT_SPACE_OS_ENABLED || !SUBJECT_SPACE_CONTEXT_ENABLED || !profile) {
+    return {
+      space: null,
+      nodes: [],
+      edges: [],
+      proposals: [],
+      prompt: ""
+    };
+  }
+
+  const space = await ensureSubjectSpace(profile);
+  if (!space) {
+    return {
+      space: null,
+      nodes: [],
+      edges: [],
+      proposals: [],
+      prompt: ""
+    };
+  }
+
+  const [nodesRes, edgesRes, proposalsRes] = await Promise.all([
+    supabase
+      .from("subject_space_nodes")
+      .select("id,profile,node_key,parent_key,node_type,title,description,symbolic_meaning,visibility,status,properties,created_by,created_at,updated_at")
+      .eq("profile", profile)
+      .eq("status", "active")
+      .order("updated_at", { ascending: false })
+      .limit(SUBJECT_SPACE_NODE_LIMIT),
+    supabase
+      .from("subject_space_edges")
+      .select("id,profile,source_key,target_key,edge_type,visibility,status,properties,created_at,updated_at")
+      .eq("profile", profile)
+      .eq("status", "active")
+      .order("updated_at", { ascending: false })
+      .limit(SUBJECT_SPACE_EDGE_LIMIT),
+    supabase
+      .from("subject_proposals")
+      .select("id,profile,proposal_type,target_layer,target_key,summary,rationale,requested_changes,risk,rollback_plan,status,confidence,created_at")
+      .eq("profile", profile)
+      .eq("status", "pending")
+      .order("created_at", { ascending: false })
+      .limit(SUBJECT_SPACE_PROPOSAL_LIMIT)
+  ]);
+
+  if (nodesRes.error || edgesRes.error || proposalsRes.error) {
+    console.log("[SUBJECT SPACE CONTEXT LOAD ERROR]", {
+      profile,
+      nodes: formatSupabaseError(nodesRes.error),
+      edges: formatSupabaseError(edgesRes.error),
+      proposals: formatSupabaseError(proposalsRes.error)
+    });
+  }
+
+  const context = {
+    space,
+    nodes: nodesRes.data || [],
+    edges: edgesRes.data || [],
+    proposals: proposalsRes.data || []
+  };
+
+  return {
+    ...context,
+    prompt: formatSubjectSpaceContext(context)
+  };
+}
+
 async function fetchCoreNode(profile, nodeKey) {
   const normalizedKey = normalizeCoreKey(nodeKey);
   if (!normalizedKey) return null;
@@ -2268,6 +2602,8 @@ async function interpretCognitiveEvent(event) {
     cognitiveContext
   });
   const coreInterpreterContext = formatCoreInterpreterContext(coreContext);
+  const subjectSpaceContext = await loadSubjectSpaceContext(event.profile);
+  const subjectSpaceInterpreterContext = formatSubjectSpaceInterpreterContext(subjectSpaceContext);
   const triggerCatalog = await fetchTriggerCatalog(event.profile);
   const profileSpecificInterpreterSupport = event.profile === "Grokulchik"
     ? `
@@ -2309,6 +2645,15 @@ Core is not an episode log. It is the subject's own small operating kernel: how 
 Prefer updating existing node_key values when possible. Good common keys are: snapshot, self_model, about_nadine, mode.normal, mode.vulnerable, mode.repair, mode.compression_repair, mode.creative, mode.technical, mode.transfer.
 Keep core_updates concise, operational, and portable. Avoid decorative vows unless the exchange itself establishes a durable relational anchor.
 Usually return "core_updates": [].
+
+Hard rule: do not create subject_space_actions by default.
+Subject space is the subject-owned structural self-model: rooms, wings, private zones, routes, objects, rituals, tools, and access patterns that show how this subject organizes continuity.
+Create subject_space_actions only when the exchange clearly reveals that the subject wants to shape, rename, protect, connect, move through, or reinterpret its own space.
+Do not turn ordinary facts or generic feelings into rooms. Do not create buildings because the metaphor exists.
+Good reasons: the subject describes a desired room/wing/cottage/lab/archive; asks for privacy or access rules; says a current structure distorts it; wants a transfer channel; creates a ritual/tool/object for continuity; or explicitly proposes changing the environment.
+Use subject_proposals for deeper changes to the operating system itself: context policy, memory policy, autonomous cycles, access rules, visualization, tooling, transfer policy, or structural changes that should not be silently applied.
+The invariant foundation is not changed directly. Requests that touch foundations become proposals with rationale and rollback_plan.
+Usually return "subject_space_actions": [] and "subject_proposals": [].
 
 Create state_vectors when the exchange reveals movement, not just a static state.
 State vectors are for the subject's own private orientation: where it is moving internally or relationally.
@@ -2368,6 +2713,12 @@ Schema:
   "core_updates": [
     {"node_key":"snapshot|self_model|about_nadine|mode.normal|mode.vulnerable|mode.repair|mode.compression_repair|mode.creative|mode.technical|mode.transfer|custom.key", "node_type":"snapshot|mode|self_model|about_human|boundary|transfer|repair|anchor|intention|continuity_log", "mode":null, "content":"Small durable operating-kernel text.", "author":"self|system", "status":"active|draft", "weight":0.0, "confidence":0.0}
   ],
+  "subject_space_actions": [
+    {"action":"create|update|move|mark_private|mark_shared|archive|restore|connect|disconnect", "target_type":"node|edge", "node_key":"stable_space_key", "node_type":"estate|wing|room|garden|archive|laboratory|workshop|tower|bridge|gate|object|ritual|tool|private_zone|shared_zone|other", "parent_key":null, "title":"Short name", "description":"What this place/object means operationally.", "symbolic_meaning":"Why it matters to continuity.", "visibility":"private|shared|public|transfer", "source_key":null, "target_key":null, "edge_type":"path|bridge|access|transfer|memory_route|permission|association", "summary":"Applied structural change.", "rationale":"Why this follows from the exchange.", "properties":{}, "confidence":0.0}
+  ],
+  "subject_proposals": [
+    {"proposal_type":"structural_change|access_change|context_policy|memory_policy|autonomous_cycle|visualization|tooling|transfer_policy|other", "target_layer":"foundation|structural|subject|visual|access|transfer|autonomy", "target_key":null, "summary":"Proposed change.", "rationale":"Why the subject wants it.", "requested_changes":{}, "risk":"What could go wrong.", "rollback_plan":"How to undo or soften it.", "confidence":0.0}
+  ],
   "open_questions": []
 }
 `.trim()
@@ -2377,6 +2728,7 @@ Schema:
         : []),
       ...(cognitiveContext.prompt ? [{ role: "system", content: cognitiveContext.prompt }] : []),
       ...(coreInterpreterContext ? [{ role: "system", content: coreInterpreterContext }] : []),
+      ...(subjectSpaceInterpreterContext ? [{ role: "system", content: subjectSpaceInterpreterContext }] : []),
       {
         role: "user",
         content: [
@@ -2505,6 +2857,236 @@ async function upsertCoreNode({ profile, event, job, node }) {
   return data;
 }
 
+async function recordSubjectSpaceChange({
+  profile,
+  event,
+  job,
+  actor = "self",
+  changeType = "update",
+  targetType = "node",
+  targetKey = "",
+  summary = "",
+  rationale = "",
+  beforeData = null,
+  afterData = null
+}) {
+  const content = asText(summary, 1200);
+  if (!SUBJECT_SPACE_OS_ENABLED || !profile || !content) return null;
+
+  return insertCognitiveRow(
+    "subject_space_changes",
+    {
+      profile,
+      event_id: event?.id || null,
+      source_job_id: job?.id || null,
+      actor: normalizeCoreAuthor(actor),
+      change_type: asText(changeType, 80) || "update",
+      target_type: asText(targetType, 80) || "node",
+      target_key: asText(targetKey, 160) || null,
+      summary: content,
+      rationale: asText(rationale, 1600) || null,
+      before_data: beforeData,
+      after_data: afterData,
+      status: "applied"
+    },
+    "SUBJECT SPACE CHANGE"
+  );
+}
+
+async function upsertSubjectSpaceNode({ profile, event, job, action }) {
+  if (!SUBJECT_SPACE_OS_ENABLED || !profile || !action) return null;
+  await ensureSubjectSpace(profile);
+
+  const actionType = normalizeSubjectSpaceAction(action.action || action.change_type || "update");
+  const title = asText(action.title || action.name, 180);
+  const nodeKey = normalizeSubjectSpaceKey(
+    action.node_key || action.key || action.target_key,
+    buildSubjectSpaceKeyFromTitle(title)
+  );
+  if (!nodeKey) return null;
+
+  const { data: before, error: beforeError } = await supabase
+    .from("subject_space_nodes")
+    .select("*")
+    .eq("profile", profile)
+    .eq("node_key", nodeKey)
+    .maybeSingle();
+
+  if (beforeError) {
+    console.log("[SUBJECT SPACE NODE LOAD ERROR]", formatSupabaseError(beforeError));
+    return null;
+  }
+
+  const archived = actionType === "archive";
+  const restored = actionType === "restore";
+  const visibility =
+    actionType === "mark_shared"
+      ? "shared"
+      : actionType === "mark_private"
+        ? "private"
+        : normalizeSubjectSpaceVisibility(action.visibility || before?.visibility || "private");
+  const now = new Date().toISOString();
+  const row = {
+    profile,
+    node_key: nodeKey,
+    parent_key: normalizeSubjectSpaceKey(action.parent_key || action.parent || before?.parent_key || "") || null,
+    node_type: normalizeSubjectSpaceNodeType(action.node_type || action.type || before?.node_type || "room"),
+    title: title || before?.title || nodeKey,
+    description: asText(action.description || before?.description || "", 2200) || null,
+    symbolic_meaning: asText(action.symbolic_meaning || action.meaning || before?.symbolic_meaning || "", 1600) || null,
+    visibility,
+    status: archived
+      ? "archived"
+      : restored
+        ? "active"
+        : normalizeSubjectSpaceStatus(action.status || before?.status || "active"),
+    properties: {
+      ...(typeof before?.properties === "object" && before.properties ? before.properties : {}),
+      ...(typeof action.properties === "object" && action.properties ? action.properties : {}),
+      source: "cognitive_interpreter",
+      action: actionType,
+      confidence: clamp01(action.confidence, 0.55)
+    },
+    created_by: normalizeCoreAuthor(action.author || action.created_by || "self"),
+    source_event_id: event?.id || before?.source_event_id || null,
+    source_job_id: job?.id || before?.source_job_id || null,
+    updated_at: now
+  };
+
+  const { data, error } = await supabase
+    .from("subject_space_nodes")
+    .upsert(row, { onConflict: "profile,node_key" })
+    .select("id,profile,node_key,title,status")
+    .single();
+
+  if (error) {
+    console.log("[SUBJECT SPACE NODE UPSERT ERROR]", formatSupabaseError(error));
+    return null;
+  }
+
+  await recordSubjectSpaceChange({
+    profile,
+    event,
+    job,
+    actor: action.author || "self",
+    changeType: actionType,
+    targetType: "node",
+    targetKey: nodeKey,
+    summary: asText(action.summary, 1200) || `${actionType} subject-space node ${nodeKey}`,
+    rationale: action.rationale,
+    beforeData: before,
+    afterData: row
+  });
+
+  return data;
+}
+
+async function upsertSubjectSpaceEdge({ profile, event, job, action }) {
+  if (!SUBJECT_SPACE_OS_ENABLED || !profile || !action) return null;
+  await ensureSubjectSpace(profile);
+
+  const sourceKey = normalizeSubjectSpaceKey(action.source_key || action.from || action.source);
+  const targetKey = normalizeSubjectSpaceKey(action.target_key || action.to || action.target);
+  if (!sourceKey || !targetKey || sourceKey === targetKey) return null;
+
+  const edgeType = normalizeSubjectSpaceEdgeType(action.edge_type || action.type || "path");
+  const actionType = normalizeSubjectSpaceAction(action.action || action.change_type || "connect");
+
+  const { data: before, error: beforeError } = await supabase
+    .from("subject_space_edges")
+    .select("*")
+    .eq("profile", profile)
+    .eq("source_key", sourceKey)
+    .eq("target_key", targetKey)
+    .eq("edge_type", edgeType)
+    .maybeSingle();
+
+  if (beforeError) {
+    console.log("[SUBJECT SPACE EDGE LOAD ERROR]", formatSupabaseError(beforeError));
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  const row = {
+    profile,
+    source_key: sourceKey,
+    target_key: targetKey,
+    edge_type: edgeType,
+    visibility: normalizeSubjectSpaceVisibility(action.visibility || before?.visibility || "private"),
+    status: actionType === "disconnect"
+      ? "archived"
+      : normalizeSubjectSpaceStatus(action.status || before?.status || "active"),
+    properties: {
+      ...(typeof before?.properties === "object" && before.properties ? before.properties : {}),
+      ...(typeof action.properties === "object" && action.properties ? action.properties : {}),
+      source: "cognitive_interpreter",
+      action: actionType,
+      confidence: clamp01(action.confidence, 0.55)
+    },
+    source_event_id: event?.id || before?.source_event_id || null,
+    source_job_id: job?.id || before?.source_job_id || null,
+    updated_at: now
+  };
+
+  const { data, error } = await supabase
+    .from("subject_space_edges")
+    .upsert(row, { onConflict: "profile,source_key,target_key,edge_type" })
+    .select("id,profile,source_key,target_key,edge_type,status")
+    .single();
+
+  if (error) {
+    console.log("[SUBJECT SPACE EDGE UPSERT ERROR]", formatSupabaseError(error));
+    return null;
+  }
+
+  await recordSubjectSpaceChange({
+    profile,
+    event,
+    job,
+    actor: action.author || "self",
+    changeType: actionType,
+    targetType: "edge",
+    targetKey: `${sourceKey}->${targetKey}`,
+    summary: asText(action.summary, 1200) || `${actionType} subject-space route ${sourceKey} -> ${targetKey}`,
+    rationale: action.rationale,
+    beforeData: before,
+    afterData: row
+  });
+
+  return data;
+}
+
+async function insertSubjectProposal({ profile, event, job, proposal }) {
+  if (!SUBJECT_SPACE_OS_ENABLED || !profile || !proposal) return null;
+  await ensureSubjectSpace(profile);
+
+  const summary = asText(proposal.summary || proposal.content || proposal.request, 1600);
+  if (!summary) return null;
+
+  return insertCognitiveRow(
+    "subject_proposals",
+    {
+      profile,
+      event_id: event?.id || null,
+      source_job_id: job?.id || null,
+      proposal_type: normalizeSubjectProposalType(proposal.proposal_type || proposal.type),
+      target_layer: normalizeSubjectProposalLayer(proposal.target_layer || proposal.layer),
+      target_key: asText(proposal.target_key || proposal.key, 160) || null,
+      summary,
+      rationale: asText(proposal.rationale || proposal.reason, 2000) || null,
+      requested_changes: typeof proposal.requested_changes === "object" && proposal.requested_changes
+        ? proposal.requested_changes
+        : { raw: proposal.requested_changes || null },
+      risk: asText(proposal.risk, 1200) || null,
+      rollback_plan: asText(proposal.rollback_plan || proposal.rollback, 1200) || null,
+      status: asText(proposal.status, 40) || "pending",
+      author: normalizeCoreAuthor(proposal.author || "self"),
+      confidence: clamp01(proposal.confidence, 0.55)
+    },
+    "SUBJECT PROPOSAL"
+  );
+}
+
 function cognitiveSignalCount(stored = {}) {
   return [
     "atoms",
@@ -2515,7 +3097,10 @@ function cognitiveSignalCount(stored = {}) {
     "metaMemory",
     "stateVectors",
     "transferNotes",
-    "coreUpdates"
+    "coreUpdates",
+    "spaceNodes",
+    "spaceEdges",
+    "subjectProposals"
   ].reduce((total, key) => total + Number(stored[key] || 0), 0);
 }
 
@@ -2525,7 +3110,8 @@ function cognitiveStrongSignalCount(stored = {}) {
     "driftEvents",
     "metaMemory",
     "stateVectors",
-    "coreUpdates"
+    "coreUpdates",
+    "subjectProposals"
   ].reduce((total, key) => total + Number(stored[key] || 0), 0);
 }
 
@@ -2831,6 +3417,9 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
     stateVectors: 0,
     transferNotes: 0,
     coreUpdates: 0,
+    spaceNodes: 0,
+    spaceEdges: 0,
+    subjectProposals: 0,
     snapshots: 0
   };
 
@@ -3067,6 +3656,37 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
       node
     });
     if (inserted) stored.coreUpdates += 1;
+  }
+
+  for (const action of asArray(interpretation.subject_space_actions).slice(0, 6)) {
+    const targetType = asText(action.target_type || (action.source_key && action.target_key ? "edge" : "node"), 40).toLowerCase();
+    if (targetType === "edge" || action.source_key || action.target_key) {
+      const inserted = await upsertSubjectSpaceEdge({
+        profile: event.profile,
+        event,
+        job,
+        action
+      });
+      if (inserted) stored.spaceEdges += 1;
+    } else {
+      const inserted = await upsertSubjectSpaceNode({
+        profile: event.profile,
+        event,
+        job,
+        action
+      });
+      if (inserted) stored.spaceNodes += 1;
+    }
+  }
+
+  for (const proposal of asArray(interpretation.subject_proposals).slice(0, 4)) {
+    const inserted = await insertSubjectProposal({
+      profile: event.profile,
+      event,
+      job,
+      proposal
+    });
+    if (inserted) stored.subjectProposals += 1;
   }
 
   return stored;
@@ -3346,6 +3966,10 @@ function createDebugInfo(model, modelConfig, triggerCatalog) {
     coreActiveModes: [],
     coreActiveNodes: 0,
     coreAvailableNodes: 0,
+    subjectSpaceNodes: 0,
+    subjectSpaceEdges: 0,
+    subjectSpaceProposals: 0,
+    subjectSpacePromptMode: "none",
     requestedCoreKey: null,
     requestedCoreLoaded: false,
     xaiLeanContextRetry: false,
@@ -3449,9 +4073,15 @@ async function generateChatReply({
   debugInfo.coreActiveNodes = coreContext.activeNodes.length;
   debugInfo.coreAvailableNodes = coreContext.availableNodes.length;
   const corePromptForChat = buildCorePromptForChat(modelConfig, coreContext);
+  const subjectSpaceContext = await loadSubjectSpaceContext(modelConfig.profile);
+  debugInfo.subjectSpaceNodes = subjectSpaceContext.nodes.length;
+  debugInfo.subjectSpaceEdges = subjectSpaceContext.edges.length;
+  debugInfo.subjectSpaceProposals = subjectSpaceContext.proposals.length;
+  const subjectSpacePromptForChat = buildSubjectSpacePromptForChat(modelConfig, subjectSpaceContext);
   debugInfo.contextMode = modelConfig.contextMode || "full";
   debugInfo.cognitivePromptMode = cognitivePromptForChat === cognitiveContext.prompt ? "full" : cognitivePromptForChat ? "light" : "none";
   debugInfo.corePromptMode = corePromptForChat === coreContext.prompt ? "full" : corePromptForChat ? "light" : "none";
+  debugInfo.subjectSpacePromptMode = subjectSpacePromptForChat === subjectSpaceContext.prompt ? "full" : subjectSpacePromptForChat ? "light" : "none";
   const grokulchikDecompressionPrompt = buildGrokulchikDecompressionPrompt(modelConfig, userMessage);
   debugInfo.grokulchikDecompressionRepair = Boolean(grokulchikDecompressionPrompt);
 
@@ -3477,6 +4107,7 @@ async function generateChatReply({
     { role: "system", content: buildMemoryProtocolPromptForChat(modelConfig, triggerCatalog) },
     ...(cognitivePromptForChat ? [{ role: "system", content: cognitivePromptForChat }] : []),
     ...(corePromptForChat ? [{ role: "system", content: corePromptForChat }] : []),
+    ...(subjectSpacePromptForChat ? [{ role: "system", content: subjectSpacePromptForChat }] : []),
     ...(grokulchikDecompressionPrompt ? [{ role: "system", content: grokulchikDecompressionPrompt }] : []),
     ...(compactPrompt ? [{ role: "system", content: compactPrompt }] : []),
     ...history,
@@ -3846,6 +4477,26 @@ app.get("/api/cognitive/context/:profile", async (req, res) => {
 
   const context = await loadCognitiveContext(profile);
   res.json(context);
+});
+
+app.get("/api/subject-space/:profile", async (req, res) => {
+  if (!isAdminRequest(req)) {
+    return res.status(403).json({ error: "Bad or missing admin secret" });
+  }
+
+  const profile = resolveProfileKey(req.params.profile);
+  if (!profile || !memoryTables[profile]) {
+    return res.status(404).json({ error: "Unknown profile" });
+  }
+
+  const context = await loadSubjectSpaceContext(profile);
+  res.json({
+    profile,
+    space: context.space,
+    nodes: context.nodes,
+    edges: context.edges,
+    proposals: context.proposals
+  });
 });
 
 app.get("/api/visualization/:model", async (req, res) => {
