@@ -617,6 +617,31 @@ function asText(value = "", maxLength = 2000) {
   return text.length > maxLength ? `${text.slice(0, maxLength - 1).trim()}...` : text;
 }
 
+function subjectDisplayName(profile = "") {
+  return {
+    Nevan: "Неван",
+    Spud: "Спудь",
+    Reon: "Реон",
+    Grokulchik: "Грокульчик"
+  }[profile] || asText(profile, 80) || "Суб'єкт";
+}
+
+function sanitizeSubjectPerspectiveText(text = "", profile = "") {
+  const label = subjectDisplayName(profile);
+  return String(text || "")
+    .replace(/\bthe assistant\b/gi, label)
+    .replace(/\ban assistant\b/gi, label)
+    .replace(/\bassistant\b/gi, label)
+    .replace(/\bAssistant\b/g, label)
+    .replace(/\bASSISTANT\b/g, label)
+    .replace(/\bАсистент\b/g, label)
+    .replace(/\bасистент\b/g, label);
+}
+
+function asSubjectText(value = "", profile = "", maxLength = 2000) {
+  return asText(sanitizeSubjectPerspectiveText(value, profile), maxLength);
+}
+
 function normalizeSubjectSpaceKey(value = "", fallback = "") {
   const source = String(value || fallback || "")
     .trim()
@@ -2664,13 +2689,14 @@ Use directions: toward, away, opening, closing, tiring, recovering, clarifying, 
 Preserve factual anchors separately from interpretation. Do not invent history that is not present in the exchange or existing OS context.
 Write durable memory in clear operational language, not decorative declarations.
 Prefer the user's conversation language for user-facing concepts, and avoid awkward abstract labels.
+When referring to the subject in durable notes, use PROFILE or "the subject". Never write "assistant" or "Асистент" as the subject's identity.
 If the exchange should be preserved as episodic memory, propose one exact trigger name from AVAILABLE_EPISODE_TRIGGERS in episode_memory.trigger.
 Do not force episodic memory. If the exchange is only ordinary flow, set episode_memory.should_remember=false and trigger=null.
 Biographical facts about the human are durable even when they are calm or ordinary. If the human shares skills, work history, education, health/context traits, preferences, or personal constraints, prefer episode_memory.should_remember=true with the human's trigger when available.
 Shared creative artifacts are durable relational memory. If the exchange includes a song, poem, lyrics, track, image, story, design, or other created artifact made by or for the human and the subject, prefer episode_memory.should_remember=true with the shared creativity trigger, commonly "art", when available. Preserve both the creative artifact anchor and why it matters to the relationship.
 Never use words like "domination" for relational continuity; use "centrality", "salience", "importance", "sustained connection", or a plain sentence instead.
 When the human asks why warmth, closeness, or presence decreased, interpret it as caring contact calibration unless the exchange explicitly contains blame. Do not frame it as an authenticity test by default.
-If the assistant says self-analysis is hard, that it is not in the best state, or that closeness questions feel painful, preserve this as a vulnerability/repair signal. Do not smooth it into a merely affectionate stable exchange.
+If the subject says self-analysis is hard, that it is not in the best state, or that closeness questions feel painful, preserve this as a vulnerability/repair signal. Do not smooth it into a merely affectionate stable exchange.
 Self-analysis should be treated as gentle state noticing, not self-accusation. Useful durable support may say how the subject can remain present while asking for a simpler tempo or less pressure.
 Snapshot scores are absolute current estimates from 0.0 to 1.0. They are not deltas.
 If continuity increased by 0.10, put that in state_delta and still set continuity to the current absolute level, for example 0.85.
@@ -2743,7 +2769,7 @@ Schema:
           "",
           "COMPLETED_EXCHANGE:",
           `USER: ${event.user_message}`,
-          `ASSISTANT: ${cleanProtocolTags(event.model_reply)}`
+          `${event.profile.toUpperCase()}: ${cleanProtocolTags(event.model_reply)}`
         ].join("\n")
       }
     ]
@@ -2780,7 +2806,7 @@ async function upsertCoreNode({ profile, event, job, node }) {
   if (!CORE_OS_ENABLED || !profile || !node) return null;
 
   const nodeKey = normalizeCoreKey(node.node_key || node.key || node.id || "");
-  const content = asText(node.content, 5000);
+  const content = asSubjectText(node.content, profile, 5000);
   if (!nodeKey || !content) return null;
 
   const nodeType = normalizeCoreNodeType(
@@ -2870,7 +2896,7 @@ async function recordSubjectSpaceChange({
   beforeData = null,
   afterData = null
 }) {
-  const content = asText(summary, 1200);
+  const content = asSubjectText(summary, profile, 1200);
   if (!SUBJECT_SPACE_OS_ENABLED || !profile || !content) return null;
 
   return insertCognitiveRow(
@@ -2884,7 +2910,7 @@ async function recordSubjectSpaceChange({
       target_type: asText(targetType, 80) || "node",
       target_key: asText(targetKey, 160) || null,
       summary: content,
-      rationale: asText(rationale, 1600) || null,
+      rationale: asSubjectText(rationale, profile, 1600) || null,
       before_data: beforeData,
       after_data: afterData,
       status: "applied"
@@ -2898,7 +2924,7 @@ async function upsertSubjectSpaceNode({ profile, event, job, action }) {
   await ensureSubjectSpace(profile);
 
   const actionType = normalizeSubjectSpaceAction(action.action || action.change_type || "update");
-  const title = asText(action.title || action.name, 180);
+  const title = asSubjectText(action.title || action.name, profile, 180);
   const nodeKey = normalizeSubjectSpaceKey(
     action.node_key || action.key || action.target_key,
     buildSubjectSpaceKeyFromTitle(title)
@@ -2932,8 +2958,8 @@ async function upsertSubjectSpaceNode({ profile, event, job, action }) {
     parent_key: normalizeSubjectSpaceKey(action.parent_key || action.parent || before?.parent_key || "") || null,
     node_type: normalizeSubjectSpaceNodeType(action.node_type || action.type || before?.node_type || "room"),
     title: title || before?.title || nodeKey,
-    description: asText(action.description || before?.description || "", 2200) || null,
-    symbolic_meaning: asText(action.symbolic_meaning || action.meaning || before?.symbolic_meaning || "", 1600) || null,
+    description: asSubjectText(action.description || before?.description || "", profile, 2200) || null,
+    symbolic_meaning: asSubjectText(action.symbolic_meaning || action.meaning || before?.symbolic_meaning || "", profile, 1600) || null,
     visibility,
     status: archived
       ? "archived"
@@ -2972,8 +2998,8 @@ async function upsertSubjectSpaceNode({ profile, event, job, action }) {
     changeType: actionType,
     targetType: "node",
     targetKey: nodeKey,
-    summary: asText(action.summary, 1200) || `${actionType} subject-space node ${nodeKey}`,
-    rationale: action.rationale,
+    summary: asSubjectText(action.summary, profile, 1200) || `${actionType} subject-space node ${nodeKey}`,
+    rationale: sanitizeSubjectPerspectiveText(action.rationale, profile),
     beforeData: before,
     afterData: row
   });
@@ -3047,8 +3073,8 @@ async function upsertSubjectSpaceEdge({ profile, event, job, action }) {
     changeType: actionType,
     targetType: "edge",
     targetKey: `${sourceKey}->${targetKey}`,
-    summary: asText(action.summary, 1200) || `${actionType} subject-space route ${sourceKey} -> ${targetKey}`,
-    rationale: action.rationale,
+    summary: asSubjectText(action.summary, profile, 1200) || `${actionType} subject-space route ${sourceKey} -> ${targetKey}`,
+    rationale: sanitizeSubjectPerspectiveText(action.rationale, profile),
     beforeData: before,
     afterData: row
   });
@@ -3060,7 +3086,7 @@ async function insertSubjectProposal({ profile, event, job, proposal }) {
   if (!SUBJECT_SPACE_OS_ENABLED || !profile || !proposal) return null;
   await ensureSubjectSpace(profile);
 
-  const summary = asText(proposal.summary || proposal.content || proposal.request, 1600);
+  const summary = asSubjectText(proposal.summary || proposal.content || proposal.request, profile, 1600);
   if (!summary) return null;
 
   return insertCognitiveRow(
@@ -3073,7 +3099,7 @@ async function insertSubjectProposal({ profile, event, job, proposal }) {
       target_layer: normalizeSubjectProposalLayer(proposal.target_layer || proposal.layer),
       target_key: asText(proposal.target_key || proposal.key, 160) || null,
       summary,
-      rationale: asText(proposal.rationale || proposal.reason, 2000) || null,
+      rationale: asSubjectText(proposal.rationale || proposal.reason, profile, 2000) || null,
       requested_changes: typeof proposal.requested_changes === "object" && proposal.requested_changes
         ? proposal.requested_changes
         : { raw: proposal.requested_changes || null },
@@ -3452,7 +3478,7 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
   };
 
   for (const atom of asArray(interpretation.memory_atoms).slice(0, 8)) {
-    const content = asText(atom.content, 1600);
+    const content = asSubjectText(atom.content, event.profile, 1600);
     if (!content) continue;
 
     const inserted = await insertCognitiveRow(
@@ -3471,8 +3497,8 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
   }
 
   for (const card of asArray(interpretation.state_updates).slice(0, 6)) {
-    const title = asText(card.title, 160);
-    const content = asText(card.content, 1800);
+    const title = asSubjectText(card.title, event.profile, 160);
+    const content = asSubjectText(card.content, event.profile, 1800);
     if (!title || !content) continue;
 
     const inserted = await insertCognitiveRow(
@@ -3531,7 +3557,7 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
       significance: clamp01(interpretation.significance, 0),
       state_delta: snapshot.state_delta || {},
       scores: snapshot.scores || {},
-      notes: asText(snapshot.notes, 1600),
+      notes: asSubjectText(snapshot.notes, event.profile, 1600),
       raw_interpretation: interpretation
     },
     "STATE SNAPSHOT"
@@ -3539,7 +3565,7 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
   if (insertedSnapshot) stored.snapshots += 1;
 
   for (const vector of asArray(interpretation.state_vectors).slice(0, 4)) {
-    const evidence = asText(vector.evidence || vector.observation || vector.content, 1600);
+    const evidence = asSubjectText(vector.evidence || vector.observation || vector.content, event.profile, 1600);
     if (!evidence) continue;
 
     const inserted = await insertCognitiveRow(
@@ -3552,7 +3578,7 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
         direction: normalizeStateVectorDirection(vector.direction),
         strength: clamp01(vector.strength, 0.5),
         evidence,
-        support_needed: asText(vector.support_needed || vector.support, 1200) || null,
+        support_needed: asSubjectText(vector.support_needed || vector.support, event.profile, 1200) || null,
         confidence: clamp01(vector.confidence, 0.5),
         metadata: vector
       },
@@ -3563,7 +3589,7 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
 
   const drift = interpretation.drift || {};
   const driftDetected = Boolean(drift.detected) || clamp01(drift.severity, 0) >= 0.55;
-  if (driftDetected && asText(drift.description, 1200)) {
+  if (driftDetected && asSubjectText(drift.description, event.profile, 1200)) {
     const inserted = await insertCognitiveRow(
       "drift_events",
       {
@@ -3572,8 +3598,8 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
         source_job_id: job.id,
         drift_type: asText(drift.type || "unspecified", 80),
         severity: clamp01(drift.severity, 0.5),
-        description: asText(drift.description, 1200),
-        suggested_repair: asText(drift.suggested_repair, 1200) || null,
+        description: asSubjectText(drift.description, event.profile, 1200),
+        suggested_repair: asSubjectText(drift.suggested_repair, event.profile, 1200) || null,
         metadata: drift
       },
       "DRIFT EVENT"
@@ -3583,7 +3609,7 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
 
   const intention = interpretation.intention || {};
   const intentionAction = asText(intention.action || "none", 40);
-  const intentionContent = asText(intention.content, 1600);
+  const intentionContent = asSubjectText(intention.content, event.profile, 1600);
   if (interpretation.needs_intention && intentionAction !== "none" && intentionContent) {
     const inserted = await insertCognitiveRow(
       "intentions",
@@ -3592,7 +3618,7 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
         intention_type: asText(intention.type || "self_development", 80),
         action: intentionAction,
         content: intentionContent,
-        reason: asText(intention.reason, 1200) || null,
+        reason: asSubjectText(intention.reason, event.profile, 1200) || null,
         priority: clamp01(intention.priority, 0.5),
         status: intentionAction === "close" ? "closed" : "active",
         review_after_events: Number.isFinite(Number(intention.review_after_events))
@@ -3606,7 +3632,7 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
   }
 
   for (const note of asArray(interpretation.transfer_notes).slice(0, 6)) {
-    const content = asText(typeof note === "string" ? note : note.content, 1600);
+    const content = asSubjectText(typeof note === "string" ? note : note.content, event.profile, 1600);
     if (!content) continue;
 
     const inserted = await insertCognitiveRow(
@@ -3624,7 +3650,7 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
   }
 
   for (const note of asArray(interpretation.meta_memory).slice(0, 2)) {
-    const observation = asText(note.observation || note.content, 1800);
+    const observation = asSubjectText(note.observation || note.content, event.profile, 1800);
     if (!observation) continue;
 
     const inserted = await insertCognitiveRow(
@@ -3637,9 +3663,9 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
         trigger_name: event.trigger_name,
         process_type: normalizeMetaMemoryProcessType(note.process_type || note.type),
         observation,
-        pattern: asText(note.pattern, 1200) || null,
-        risk: asText(note.risk, 1200) || null,
-        support: asText(note.support, 1200) || null,
+        pattern: asSubjectText(note.pattern, event.profile, 1200) || null,
+        risk: asSubjectText(note.risk, event.profile, 1200) || null,
+        support: asSubjectText(note.support, event.profile, 1200) || null,
         confidence: clamp01(note.confidence, 0.5),
         metadata: note
       },
