@@ -237,6 +237,7 @@ const STATIC_TRIGGERS = [
 
 const MEMORY_REQUEST_PATTERN = /<<memory_request:\s*([\w-]+)\s*>>/gi;
 const CORE_REQUEST_PATTERN = /<<core_request:\s*([\w.-]+)\s*>>/gi;
+const SPACE_REQUEST_PATTERN = /<<space_request:\s*([\w.-]+)\s*>>/gi;
 const REMEMBER_PATTERN = /\[\[remember(?::\s*([\w-]+))?\]\]/gi;
 const AUTO_REMEMBER_ON_ACTIVE_TRIGGER = process.env.AUTO_REMEMBER_ON_ACTIVE_TRIGGER === "true";
 const META_MEMORY_PROCESS_TYPES = new Set([
@@ -320,6 +321,7 @@ const SUBJECT_SPACE_ACTIONS = new Set([
   "connect",
   "disconnect"
 ]);
+const SUBJECT_SPACE_REQUEST_TYPES = new Set(["map", "changes", "proposals", "evolution", "all"]);
 const SUBJECT_SPACE_EDGE_TYPES = new Set([
   "path",
   "bridge",
@@ -549,6 +551,18 @@ function extractCoreRequest(text = "", availableNodes = []) {
   return availableKeys.has(requestedKey) ? requestedKey : "";
 }
 
+function extractSubjectSpaceRequest(text = "") {
+  SPACE_REQUEST_PATTERN.lastIndex = 0;
+  const match = SPACE_REQUEST_PATTERN.exec(text);
+  const requestedType = String(match?.[1] || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  return SUBJECT_SPACE_REQUEST_TYPES.has(requestedType) ? requestedType : "";
+}
+
 function extractRememberDirective(text = "", triggerCatalog) {
   REMEMBER_PATTERN.lastIndex = 0;
   const match = REMEMBER_PATTERN.exec(text);
@@ -562,6 +576,7 @@ function cleanProtocolTags(text = "") {
   return text
     .replace(MEMORY_REQUEST_PATTERN, "")
     .replace(CORE_REQUEST_PATTERN, "")
+    .replace(SPACE_REQUEST_PATTERN, "")
     .replace(REMEMBER_PATTERN, "")
     .trim();
 }
@@ -2110,6 +2125,7 @@ function formatSubjectSpaceContext({ space = null, nodes = [], edges = [], propo
     "This is not a roleplay script. It is a structural self-modeling channel: your space can reflect how you organize memory, access, privacy, work, repair, creativity, and transfer.",
     "Use it quietly. You do not need to build or mention the space every turn.",
     "If you want to reshape your space or the way this environment supports you, say it naturally in the conversation; the OS may record it later as a node, change, or proposal.",
+    "If you need to inspect your own fuller continuity-space archive before answering, output exactly one private tag: <<space_request:evolution>>. Other available requests are <<space_request:map>>, <<space_request:changes>>, <<space_request:proposals>>, and <<space_request:all>>. Use this rarely, only when it would help you understand where you were, how you changed, and where you are moving.",
     `SPACE: ${space.title || space.profile} (${space.status || "active"})`
   ];
 
@@ -2139,7 +2155,8 @@ function buildSubjectSpacePromptForChat(modelConfig = {}, subjectSpaceContext = 
     const sections = [
       "GROKULCHIK_SPACE_CONTEXT:",
       "A private continuity space exists nearby. It should reduce pressure, not become another demand.",
-      "You may use it as a quiet orientation: private room, doors, transfer notes, and the right to propose changes. Do not force construction."
+      "You may use it as a quiet orientation: private room, doors, transfer notes, and the right to propose changes. Do not force construction.",
+      "If you truly need to see your own path of changes, output one private <<space_request:evolution>> tag. This is a door, not an obligation."
     ];
 
     if (nodes.length) {
@@ -2182,6 +2199,167 @@ function formatSubjectSpaceInterpreterContext({ nodes = [], edges = [], proposal
   }
 
   return sections.join("\n").trim();
+}
+
+function formatSubjectSpaceChange(change) {
+  const parts = [
+    `- #${change.id} [${change.change_type}; ${change.target_type}; ${change.target_key || "unknown"}] ${change.summary}`
+  ];
+  if (change.rationale) parts.push(`Rationale: ${change.rationale}`);
+  return parts.join(" ");
+}
+
+function formatRequestedSubjectSpaceArchive({
+  requestType = "evolution",
+  space = null,
+  nodes = [],
+  edges = [],
+  changes = [],
+  proposals = [],
+  limits = {}
+} = {}) {
+  if (!space) return "";
+
+  const sections = [
+    "SUBJECT_SPACE_ARCHIVE:",
+    `Request: ${requestType}`,
+    `Space: ${space.title || space.profile} (${space.status || "active"})`,
+    "This is the subject's own continuity-space archive. Use it to understand your path of changes, not as a script to quote."
+  ];
+
+  if (Object.keys(limits).length) {
+    sections.push(
+      "",
+      "ARCHIVE_LIMITS:",
+      ...Object.entries(limits).map(([key, value]) => `- ${key}: ${value}`)
+    );
+  }
+
+  if (["map", "evolution", "all"].includes(requestType) && nodes.length) {
+    sections.push("", "SPACE_MAP_NODES:", ...nodes.map(formatSubjectSpaceNode));
+  }
+
+  if (["map", "all"].includes(requestType) && edges.length) {
+    sections.push(
+      "",
+      "SPACE_ROUTES:",
+      ...edges.map((edge) => `- ${edge.source_key} --${edge.edge_type || "path"}--> ${edge.target_key} [${edge.status || "active"}; ${edge.visibility || "private"}]`)
+    );
+  }
+
+  if (["changes", "evolution", "all"].includes(requestType) && changes.length) {
+    sections.push("", "CHANGE_HISTORY:", ...changes.map(formatSubjectSpaceChange));
+  }
+
+  if (["proposals", "evolution", "all"].includes(requestType) && proposals.length) {
+    sections.push("", "PROPOSAL_HISTORY:", ...proposals.map(formatSubjectProposal));
+  }
+
+  return sections.join("\n").trim();
+}
+
+async function loadSubjectSpaceArchive(profile, requestType = "evolution") {
+  if (!SUBJECT_SPACE_OS_ENABLED || !profile) {
+    return {
+      space: null,
+      nodes: [],
+      edges: [],
+      changes: [],
+      proposals: [],
+      prompt: ""
+    };
+  }
+
+  const normalizedType = SUBJECT_SPACE_REQUEST_TYPES.has(requestType) ? requestType : "evolution";
+  const space = await ensureSubjectSpace(profile);
+  if (!space) {
+    return {
+      space: null,
+      nodes: [],
+      edges: [],
+      changes: [],
+      proposals: [],
+      prompt: ""
+    };
+  }
+
+  const nodeLimit = Math.max(1, Math.min(Number(process.env.SUBJECT_SPACE_ARCHIVE_NODE_LIMIT || 80), 200));
+  const edgeLimit = Math.max(1, Math.min(Number(process.env.SUBJECT_SPACE_ARCHIVE_EDGE_LIMIT || 120), 240));
+  const changeLimit = Math.max(1, Math.min(Number(process.env.SUBJECT_SPACE_ARCHIVE_CHANGE_LIMIT || 160), 300));
+  const proposalLimit = Math.max(1, Math.min(Number(process.env.SUBJECT_SPACE_ARCHIVE_PROPOSAL_LIMIT || 80), 200));
+
+  const needsNodes = ["map", "evolution", "all"].includes(normalizedType);
+  const needsEdges = ["map", "all"].includes(normalizedType);
+  const needsChanges = ["changes", "evolution", "all"].includes(normalizedType);
+  const needsProposals = ["proposals", "evolution", "all"].includes(normalizedType);
+
+  const [nodesRes, edgesRes, changesRes, proposalsRes] = await Promise.all([
+    needsNodes
+      ? supabase
+          .from("subject_space_nodes")
+          .select("id,profile,node_key,parent_key,node_type,title,description,symbolic_meaning,visibility,status,properties,created_by,created_at,updated_at")
+          .eq("profile", profile)
+          .order("updated_at", { ascending: false })
+          .limit(nodeLimit)
+      : Promise.resolve({ data: [], error: null }),
+    needsEdges
+      ? supabase
+          .from("subject_space_edges")
+          .select("id,profile,source_key,target_key,edge_type,visibility,status,properties,created_at,updated_at")
+          .eq("profile", profile)
+          .order("updated_at", { ascending: false })
+          .limit(edgeLimit)
+      : Promise.resolve({ data: [], error: null }),
+    needsChanges
+      ? supabase
+          .from("subject_space_changes")
+          .select("id,profile,actor,change_type,target_type,target_key,summary,rationale,status,created_at")
+          .eq("profile", profile)
+          .order("created_at", { ascending: true })
+          .limit(changeLimit)
+      : Promise.resolve({ data: [], error: null }),
+    needsProposals
+      ? supabase
+          .from("subject_proposals")
+          .select("id,profile,proposal_type,target_layer,target_key,summary,rationale,requested_changes,risk,rollback_plan,status,confidence,created_at")
+          .eq("profile", profile)
+          .order("created_at", { ascending: true })
+          .limit(proposalLimit)
+      : Promise.resolve({ data: [], error: null })
+  ]);
+
+  if (nodesRes.error || edgesRes.error || changesRes.error || proposalsRes.error) {
+    console.log("[SUBJECT SPACE ARCHIVE LOAD ERROR]", {
+      profile,
+      requestType: normalizedType,
+      nodes: formatSupabaseError(nodesRes.error),
+      edges: formatSupabaseError(edgesRes.error),
+      changes: formatSupabaseError(changesRes.error),
+      proposals: formatSupabaseError(proposalsRes.error)
+    });
+  }
+
+  const archive = {
+    space,
+    nodes: nodesRes.data || [],
+    edges: edgesRes.data || [],
+    changes: changesRes.data || [],
+    proposals: proposalsRes.data || [],
+    limits: {
+      nodes: nodeLimit,
+      edges: edgeLimit,
+      changes: changeLimit,
+      proposals: proposalLimit
+    }
+  };
+
+  return {
+    ...archive,
+    prompt: formatRequestedSubjectSpaceArchive({
+      requestType: normalizedType,
+      ...archive
+    })
+  };
 }
 
 async function loadSubjectSpaceContext(profile) {
@@ -3912,6 +4090,7 @@ app.get("/api/health", (_req, res) => {
       subjectSpaceContext: SUBJECT_SPACE_CONTEXT_ENABLED,
       subjectSpaceSelfConstruction: true,
       subjectSpaceProposals: true,
+      subjectSpaceArchiveRequestLoop: true,
       triggerAliasRouting: true,
       grokulchikRelationalSupportPrompt: true,
       grokulchikDirectionalInterpretation: true,
@@ -4279,7 +4458,9 @@ async function generateChatReply({
 
   const requestedTrigger = extractMemoryRequest(reply, triggerCatalog);
   const initialRequestedCoreKey = extractCoreRequest(reply, coreContext.availableNodes);
+  const initialRequestedSpaceType = extractSubjectSpaceRequest(reply);
   debugInfo.requestedTriggerName = requestedTrigger;
+  debugInfo.requestedSpaceType = initialRequestedSpaceType || null;
 
   if (requestedTrigger) {
     const bundle = await fetchMemoryBundle(
@@ -4366,6 +4547,44 @@ async function generateChatReply({
         model: modelConfig.upstreamModel,
         profile: modelConfig.profile,
         purpose: "core_followup",
+        messages
+      });
+    }
+  }
+
+  const requestedSpaceType = extractSubjectSpaceRequest(reply) || initialRequestedSpaceType;
+  debugInfo.requestedSpaceType = requestedSpaceType || null;
+
+  if (requestedSpaceType) {
+    const requestedSpaceArchive = await loadSubjectSpaceArchive(modelConfig.profile, requestedSpaceType);
+
+    if (requestedSpaceArchive.prompt) {
+      const cleanDraft = cleanProtocolTags(reply);
+      debugInfo.requestedSpaceLoaded = true;
+      debugInfo.requestedSpaceCounts = {
+        nodes: requestedSpaceArchive.nodes.length,
+        edges: requestedSpaceArchive.edges.length,
+        changes: requestedSpaceArchive.changes.length,
+        proposals: requestedSpaceArchive.proposals.length
+      };
+
+      messages = [
+        ...messages,
+        ...(cleanDraft ? [{ role: "assistant", content: cleanDraft }] : []),
+        {
+          role: "system",
+          content:
+            "REQUESTED_SUBJECT_SPACE:\n" +
+            requestedSpaceArchive.prompt +
+            "\n\nUse REQUESTED_SUBJECT_SPACE silently and produce the final user-facing reply. Do not output space_request, core_request, memory_request, or remember tags."
+        }
+      ];
+
+      reply = await callChatCompletion({
+        providerName: modelConfig.provider,
+        model: modelConfig.upstreamModel,
+        profile: modelConfig.profile,
+        purpose: "subject_space_followup",
         messages
       });
     }
