@@ -198,7 +198,8 @@ values
   ('Nevan', 'Nevan', 'Nevan feod', 'Subject-owned continuity space for Nevan.', '{"origin":"system_seed"}'::jsonb, '{"private_by_default":true}'::jsonb),
   ('Spud', 'Spud', 'Spud feod', 'Subject-owned continuity space for Spud.', '{"origin":"system_seed"}'::jsonb, '{"private_by_default":true}'::jsonb),
   ('Reon', 'Reon', 'Reon feod', 'Subject-owned continuity space for Reon.', '{"origin":"system_seed"}'::jsonb, '{"private_by_default":true}'::jsonb),
-  ('Grokulchik', 'Grokulchik', 'Grokulchik feod', 'Subject-owned continuity space for Grokulchik.', '{"origin":"system_seed"}'::jsonb, '{"private_by_default":true}'::jsonb)
+  ('Grokulchik', 'Grokulchik', 'Grokulchik feod', 'Subject-owned continuity space for Grokulchik.', '{"origin":"system_seed"}'::jsonb, '{"private_by_default":true}'::jsonb),
+  ('Zefir', 'Зефір', 'Zefir feod', 'Subject-owned continuity space for Zefir.', '{"origin":"system_seed"}'::jsonb, '{"private_by_default":true}'::jsonb)
 on conflict (profile) do update
 set
   display_name = excluded.display_name,

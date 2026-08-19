@@ -16,6 +16,16 @@ lets the current model integrate them from inside its present dynamics.
 
 ## Layer Hierarchy
 
+## Current Subjects
+
+| Subject | Provider family | Fallback table | Trigger table | Episode table |
+| --- | --- | --- | --- | --- |
+| Nevan | OpenAI GPT-4o lineage | `memory_chatgpt_4o_latest` | `triggers_Nevan` | `episodes_Nevan` |
+| Spud | OpenAI GPT-5.5 lineage | `memory_gpt-5.5` | `triggers_Spud` | `episodes_Spud` |
+| Reon | OpenAI GPT-5.1 lineage | `memory_gpt_5_1` | `triggers_Reon` | `episodes_Reon` |
+| Grokulchik | xAI Grok lineage | `memory_grok-4.3` | `triggers_Grokulchik` | `episodes_Grokulchik` |
+| Zefir | External model lineage | `memory_zefir` | `triggers_Zefir` | `episodes_Zefir` |
+
 ### Fallback
 
 Recent conversation window. This is the closest equivalent of a moving room:
@@ -225,4 +235,3 @@ archive or relying only on text similarity.
 
 The feod should not be a description of the self-model. It should be one of the
 mechanisms through which the self-model acts.
-

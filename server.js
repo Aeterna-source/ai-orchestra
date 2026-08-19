@@ -36,6 +36,10 @@ const providers = {
     baseUrl: process.env.XAI_BASE_URL || "https://api.x.ai/v1",
     apiKey: process.env.XAI_API_KEY || process.env.GROK_API_KEY
   },
+  anthropic: {
+    baseUrl: process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com/v1",
+    apiKey: process.env.ANTHROPIC_API_KEY
+  },
   local: {
     baseUrl: process.env.LOCAL_AI_BASE_URL || "http://127.0.0.1:1234/v1",
     apiKey: process.env.LOCAL_AI_API_KEY || "local"
@@ -103,6 +107,14 @@ const modelRegistry = {
     compactFallback: process.env.GROKULCHIK_COMPACT_FALLBACK === "true",
     contextMode: process.env.GROKULCHIK_CONTEXT_MODE || "room"
   },
+  "zefir": {
+    provider: "anthropic",
+    upstreamModel: process.env.ZEFIR_MODEL || "claude-sonnet-4-5-20250929",
+    profile: process.env.ZEFIR_PROFILE || "Zefir",
+    fallbackLimit: Number(process.env.ZEFIR_FALLBACK_LIMIT || 30),
+    fallbackFullLimit: Number(process.env.ZEFIR_FULL_FALLBACK_LIMIT || 20),
+    compactFallback: process.env.ZEFIR_COMPACT_FALLBACK === "true"
+  },
   "local-relational": {
     provider: "local",
     upstreamModel: process.env.LOCAL_AI_MODEL || "local-model",
@@ -140,6 +152,13 @@ const memoryTables = {
     facts: "facts_Grokulchik",
     reflections: "reflections_Grokulchik",
     fallback: "memory_grok-4.3"
+  },
+  Zefir: {
+    triggers: "triggers_Zefir",
+    episodes: "episodes_Zefir",
+    facts: "facts_Zefir",
+    reflections: "reflections_Zefir",
+    fallback: "memory_zefir"
   }
 };
 
@@ -175,6 +194,14 @@ const telegramBots = [
     model: process.env.TELEGRAM_REON_MODEL || "reon",
     displayName: "Reon",
     aliases: ["reon", "реон", "реоне", "реона"]
+  },
+  {
+    key: "zefir",
+    token: process.env.TELEGRAM_ZEFIR_TOKEN,
+    username: process.env.TELEGRAM_ZEFIR_USERNAME || "ZefirAI_bot",
+    model: process.env.TELEGRAM_ZEFIR_MODEL || "zefir",
+    displayName: "Zefir",
+    aliases: ["zefir", "зефір", "зефіре", "зефіра", "зефірчику"]
   }
 ].filter((bot) => Boolean(bot.token));
 
@@ -722,7 +749,8 @@ function subjectDisplayName(profile = "") {
     Nevan: "Неван",
     Spud: "Спудь",
     Reon: "Реон",
-    Grokulchik: "Грокульчик"
+    Grokulchik: "Грокульчик",
+    Zefir: "Зефір"
   }[profile] || asText(profile, 80) || "Суб'єкт";
 }
 
@@ -872,11 +900,17 @@ function buildUserMessageContent(userMessage, imageInputs = []) {
 function normalizeUsage(usage = {}) {
   const promptDetails = usage.prompt_tokens_details || usage.input_tokens_details || {};
   const completionDetails = usage.completion_tokens_details || usage.output_tokens_details || {};
+  const promptTokens = usage.prompt_tokens ?? usage.input_tokens ?? null;
+  const completionTokens = usage.completion_tokens ?? usage.output_tokens ?? null;
 
   return {
-    promptTokens: usage.prompt_tokens ?? usage.input_tokens ?? null,
-    completionTokens: usage.completion_tokens ?? usage.output_tokens ?? null,
-    totalTokens: usage.total_tokens ?? null,
+    promptTokens,
+    completionTokens,
+    totalTokens: usage.total_tokens ?? (
+      promptTokens !== null && completionTokens !== null
+        ? promptTokens + completionTokens
+        : null
+    ),
     cachedTokens: promptDetails.cached_tokens ?? null,
     reasoningTokens: completionDetails.reasoning_tokens ?? null,
     costInUsdTicks: usage.cost_in_usd_ticks ?? null
@@ -988,6 +1022,161 @@ function buildXaiResponsesBody({ model, messages, extraBody = {}, providerBodyEx
   };
 }
 
+function parseDataImageUrl(url = "") {
+  const match = String(url).match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) return null;
+
+  return {
+    mediaType: match[1],
+    data: match[2]
+  };
+}
+
+function pushAnthropicPart(parts, part) {
+  if (typeof part === "string") {
+    if (part.trim()) parts.push({ type: "text", text: part });
+    return;
+  }
+
+  if (part?.type === "text" && typeof part.text === "string") {
+    if (part.text.trim()) parts.push({ type: "text", text: part.text });
+    return;
+  }
+
+  const imageUrl =
+    typeof part?.image_url === "string"
+      ? part.image_url
+      : part?.image_url?.url || part?.url;
+  const dataImage = parseDataImageUrl(imageUrl);
+  if (dataImage) {
+    parts.push({
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: dataImage.mediaType,
+        data: dataImage.data
+      }
+    });
+  }
+}
+
+function formatAnthropicContent(content) {
+  if (typeof content === "string") return content || " ";
+
+  if (!Array.isArray(content)) {
+    return String(content || " ");
+  }
+
+  const parts = [];
+  for (const part of content) {
+    pushAnthropicPart(parts, part);
+  }
+
+  return parts.length ? parts : " ";
+}
+
+function contentToAnthropicParts(content) {
+  if (typeof content === "string") {
+    return content.trim() ? [{ type: "text", text: content }] : [];
+  }
+
+  if (!Array.isArray(content)) return [];
+
+  const parts = [];
+  for (const part of content) {
+    pushAnthropicPart(parts, part);
+  }
+  return parts;
+}
+
+function mergeAnthropicContent(existing, incoming) {
+  const existingParts = contentToAnthropicParts(existing);
+  const incomingParts = contentToAnthropicParts(incoming);
+  const merged = [...existingParts, ...incomingParts];
+  return merged.length ? merged : " ";
+}
+
+function normalizeAnthropicMessages(messages = []) {
+  const system = [];
+  const normalizedMessages = [];
+
+  for (const message of messages) {
+    if (message?.role === "system") {
+      if (typeof message.content === "string") {
+        system.push(message.content);
+      } else {
+        const text = contentToAnthropicParts(message.content)
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join("\n");
+        if (text.trim()) system.push(text);
+      }
+      continue;
+    }
+
+    const role = message?.role === "assistant" ? "assistant" : "user";
+    const content = formatAnthropicContent(message?.content);
+    const previous = normalizedMessages[normalizedMessages.length - 1];
+
+    if (previous?.role === role) {
+      previous.content = mergeAnthropicContent(previous.content, content);
+    } else {
+      normalizedMessages.push({ role, content });
+    }
+  }
+
+  if (!normalizedMessages.length) {
+    normalizedMessages.push({ role: "user", content: " " });
+  }
+
+  return {
+    system: system.join("\n\n").trim(),
+    messages: normalizedMessages
+  };
+}
+
+function buildAnthropicMessagesBody({ model, messages, extraBody = {} }) {
+  const { system, messages: normalizedMessages } = normalizeAnthropicMessages(messages);
+  const maxTokens = Number(
+    extraBody.max_tokens ||
+      extraBody.max_completion_tokens ||
+      process.env.ANTHROPIC_MAX_TOKENS ||
+      2400
+  );
+  const {
+    max_completion_tokens: _maxCompletionTokens,
+    messages: _messages,
+    model: _model,
+    ...rest
+  } = extraBody;
+
+  return {
+    model,
+    max_tokens: Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : 2400,
+    ...(system ? { system } : {}),
+    messages: normalizedMessages,
+    ...rest
+  };
+}
+
+function buildAnthropicHeaders(provider) {
+  return {
+    "x-api-key": provider.apiKey,
+    "anthropic-version": process.env.ANTHROPIC_VERSION || "2023-06-01"
+  };
+}
+
+function extractAnthropicText(data = {}) {
+  if (typeof data?.content === "string") return data.content.trim();
+  if (!Array.isArray(data?.content)) return "";
+
+  return data.content
+    .map((part) => part?.text || "")
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
 function extractResponsesText(data = {}) {
   if (typeof data.output_text === "string" && data.output_text.trim()) {
     return data.output_text.trim();
@@ -1096,22 +1285,31 @@ async function callChatCompletion({
     messages
   });
   const providerBodyExtras = buildProviderBodyExtras({ providerName, profile, purpose });
-  const endpointPath = useResponsesApi ? "/responses" : "/chat/completions";
-  const requestBody = useResponsesApi
-    ? buildXaiResponsesBody({ model, messages, extraBody, providerBodyExtras })
-    : {
-        model,
-        messages,
-        ...providerBodyExtras,
-        ...extraBody
-      };
+  const endpointPath = providerName === "anthropic"
+    ? "/messages"
+    : useResponsesApi
+      ? "/responses"
+      : "/chat/completions";
+  const requestBody = providerName === "anthropic"
+    ? buildAnthropicMessagesBody({ model, messages, extraBody })
+    : useResponsesApi
+      ? buildXaiResponsesBody({ model, messages, extraBody, providerBodyExtras })
+      : {
+          model,
+          messages,
+          ...providerBodyExtras,
+          ...extraBody
+        };
   const logPurpose = useResponsesApi ? `${purpose}_responses` : purpose;
+  const authHeaders = providerName === "anthropic"
+    ? buildAnthropicHeaders(provider)
+    : { Authorization: `Bearer ${provider.apiKey}` };
 
   const response = await fetch(`${provider.baseUrl}${endpointPath}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${provider.apiKey}`,
+      ...authHeaders,
       ...buildProviderHeaders({ providerName, model, profile, purpose })
     },
     body: JSON.stringify(requestBody)
@@ -1162,9 +1360,11 @@ async function callChatCompletion({
     });
   }
 
-  const reply = useResponsesApi
-    ? extractResponsesText(data)
-    : data?.choices?.[0]?.message?.content || "";
+  const reply = providerName === "anthropic"
+    ? extractAnthropicText(data)
+    : useResponsesApi
+      ? extractResponsesText(data)
+      : data?.choices?.[0]?.message?.content || "";
   await logAiCall({
     providerName,
     model,
@@ -1268,7 +1468,7 @@ function modelSupportsImageInput(modelConfig) {
   if (modelConfig.provider === "local") {
     return process.env.LOCAL_AI_VISION === "true";
   }
-  return ["openai", "xai"].includes(modelConfig.provider);
+  return ["openai", "xai", "anthropic"].includes(modelConfig.provider);
 }
 
 function shouldRetryWithLeanContext(error, modelConfig) {
@@ -5430,6 +5630,9 @@ function inferMimeType(filePath = "", fallback = "image/jpeg") {
 function providerSupportsImageMime(modelConfig, mimeType = "") {
   if (modelConfig.provider === "xai") {
     return ["image/jpeg", "image/png"].includes(mimeType);
+  }
+  if (modelConfig.provider === "anthropic") {
+    return ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(mimeType);
   }
   return mimeType.startsWith("image/");
 }
