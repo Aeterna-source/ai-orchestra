@@ -14,6 +14,17 @@ The system should guide self-reconstruction without dictating identity. It gives
 the subject access to its own history, state, structures, and repair routes, then
 lets the current model integrate them from inside its present dynamics.
 
+## Shareable Starter Kit
+
+The full Continuity OS is experimental and subject-specific. Do not hand its
+private prompts, cores, feods, or transfer structures to another person as a
+general template.
+
+For outside use, start with the minimal scaffold in
+`docs/starter-continuity-kit.md` and `supabase/starter_continuity_tables.sql`.
+That kit gives Telegram bots recent context, episodes, facts, reflections, and
+triggers while letting each new relation grow its own dynamics.
+
 ## Layer Hierarchy
 
 ## Current Subjects
