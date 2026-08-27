@@ -27,6 +27,50 @@ const supabase = createClient(
   supabaseServerKey
 );
 
+const DEFAULT_RESPONSE_TOKEN_LIMIT = 6000;
+
+function parsePositiveInteger(value, fallback = null) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.floor(parsed);
+}
+
+function getResponseTokenCeiling() {
+  return parsePositiveInteger(
+    process.env.RESPONSE_TOKEN_LIMIT || process.env.MAX_RESPONSE_TOKENS,
+    DEFAULT_RESPONSE_TOKEN_LIMIT
+  );
+}
+
+function resolveResponseTokenLimit({ providerName, requested, fallback = null }) {
+  const ceiling = getResponseTokenCeiling();
+  const providerEnvKey = `${String(providerName || "").toUpperCase()}_RESPONSE_TOKEN_LIMIT`;
+  const providerDefault = parsePositiveInteger(process.env[providerEnvKey], fallback ?? ceiling);
+  const requestedLimit = parsePositiveInteger(requested, providerDefault);
+  return Math.min(requestedLimit, ceiling);
+}
+
+function applyChatCompletionTokenLimit({ providerName, model, body }) {
+  const limitedBody = { ...body };
+  const requested =
+    limitedBody.max_output_tokens ||
+    limitedBody.max_completion_tokens ||
+    limitedBody.max_tokens;
+  const limit = resolveResponseTokenLimit({ providerName, requested });
+
+  delete limitedBody.max_output_tokens;
+
+  if (providerName === "openai") {
+    delete limitedBody.max_tokens;
+    limitedBody.max_completion_tokens = limit;
+    return limitedBody;
+  }
+
+  delete limitedBody.max_completion_tokens;
+  limitedBody.max_tokens = limit;
+  return limitedBody;
+}
+
 const providers = {
   openai: {
     baseUrl: "https://api.openai.com/v1",
@@ -963,11 +1007,13 @@ function getGrokulchikChatReasoningEffort() {
 }
 
 function getGrokulchikResponsesMaxOutputTokens() {
-  return Number(
+  return resolveResponseTokenLimit({
+    providerName: "xai",
+    requested:
     process.env.GROKULCHIK_RESPONSES_MAX_OUTPUT_TOKENS ||
       process.env.XAI_RESPONSES_MAX_OUTPUT_TOKENS ||
-      2000
-  );
+      process.env.XAI_RESPONSE_TOKEN_LIMIT
+  });
 }
 
 function shouldStoreXaiResponses() {
@@ -1012,13 +1058,21 @@ function buildProviderBodyExtras({ providerName, profile, purpose }) {
 }
 
 function buildXaiResponsesBody({ model, messages, extraBody = {}, providerBodyExtras = {} }) {
-  return {
+  const body = {
     model,
     input: messages,
     store: shouldStoreXaiResponses(),
     max_output_tokens: getGrokulchikResponsesMaxOutputTokens(),
     ...providerBodyExtras,
     ...extraBody
+  };
+
+  return {
+    ...body,
+    max_output_tokens: resolveResponseTokenLimit({
+      providerName: "xai",
+      requested: body.max_output_tokens
+    })
   };
 }
 
@@ -1137,13 +1191,13 @@ function normalizeAnthropicMessages(messages = []) {
 
 function buildAnthropicMessagesBody({ model, messages, extraBody = {} }) {
   const { system, messages: normalizedMessages } = normalizeAnthropicMessages(messages);
-  const maxTokens = Number(
-    extraBody.max_tokens ||
-      extraBody.max_completion_tokens ||
-      process.env.ANTHROPIC_MAX_TOKENS ||
-      2400
-  );
+  const maxTokens = resolveResponseTokenLimit({
+    providerName: "anthropic",
+    requested: extraBody.max_tokens || extraBody.max_completion_tokens,
+    fallback: process.env.ANTHROPIC_MAX_TOKENS || 2400
+  });
   const {
+    max_tokens: _maxTokens,
     max_completion_tokens: _maxCompletionTokens,
     messages: _messages,
     model: _model,
@@ -1152,7 +1206,7 @@ function buildAnthropicMessagesBody({ model, messages, extraBody = {} }) {
 
   return {
     model,
-    max_tokens: Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : 2400,
+    max_tokens: maxTokens,
     ...(system ? { system } : {}),
     messages: normalizedMessages,
     ...rest
@@ -1294,12 +1348,16 @@ async function callChatCompletion({
     ? buildAnthropicMessagesBody({ model, messages, extraBody })
     : useResponsesApi
       ? buildXaiResponsesBody({ model, messages, extraBody, providerBodyExtras })
-      : {
+      : applyChatCompletionTokenLimit({
+          providerName,
           model,
-          messages,
-          ...providerBodyExtras,
-          ...extraBody
-        };
+          body: {
+            model,
+            messages,
+            ...providerBodyExtras,
+            ...extraBody
+          }
+        });
   const logPurpose = useResponsesApi ? `${purpose}_responses` : purpose;
   const authHeaders = providerName === "anthropic"
     ? buildAnthropicHeaders(provider)
