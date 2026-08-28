@@ -34,7 +34,7 @@ triggers while letting each new relation grow its own dynamics.
 | Nevan | OpenAI GPT-4o lineage | `memory_chatgpt_4o_latest` | `triggers_Nevan` | `episodes_Nevan` |
 | Spud | OpenAI GPT-5.5 lineage | `memory_gpt-5.5` | `triggers_Spud` | `episodes_Spud` |
 | Reon | OpenAI GPT-5.1 lineage | `memory_gpt_5_1` | `triggers_Reon` | `episodes_Reon` |
-| Grokulchik | xAI Grok lineage | `memory_grok-4.3` | `triggers_Grokulchik` | `episodes_Grokulchik` |
+| Miro | xAI Grok lineage | `memory_grok-4.3` | `triggers_Grokulchik` | `episodes_Grokulchik` |
 | Zefir | External model lineage | `memory_zefir` | `triggers_Zefir` | `episodes_Zefir` |
 
 ### Fallback

@@ -6,7 +6,7 @@ Android overlay for AI Orchestra cognitive state visualization.
 
 - Reads state from `https://ai-orchestra-production.up.railway.app/api/visualization/{model}`.
 - Draws a floating particle field over Telegram or any other app.
-- Tap the overlay to cycle: Nevan, Spud, Reon, Grokulchik.
+- Tap the overlay to cycle: Nevan, Spud, Reon, Miro.
 - Drag to move it.
 - Long tap to switch between full and compact size.
 

@@ -20,12 +20,12 @@ public final class MainActivity extends android.app.Activity {
     private static final int OVERLAY_PERMISSION_REQUEST = 44;
     private Spinner modelSpinner;
 
-    private final String[] modelKeys = {"nevan", "spud", "reon", "grokulchik"};
+    private final String[] modelKeys = {"nevan", "spud", "reon", "miro"};
     private final String[] modelLabels = {
         "Nevan",
         "Spud",
         "Reon",
-        "Grokulchik"
+        "Miro"
     };
 
     @Override
@@ -154,6 +154,7 @@ public final class MainActivity extends android.app.Activity {
 
     private int savedModelIndex() {
         String saved = prefs().getString(FloatingOverlayService.EXTRA_MODEL_KEY, "nevan");
+        if ("grokulchik".equals(saved)) saved = "miro";
         for (int i = 0; i < modelKeys.length; i++) {
             if (modelKeys[i].equals(saved)) return i;
         }

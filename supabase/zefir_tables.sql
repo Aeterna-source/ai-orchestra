@@ -1,5 +1,5 @@
 -- Zefir continuity tables.
--- Mirrors the per-subject memory pattern used by Nevan, Spud, Reon, and Grokulchik.
+-- Mirrors the per-subject memory pattern used by Nevan, Spud, Reon, and Miro.
 
 create table if not exists public."memory_zefir" (
   id bigserial primary key,

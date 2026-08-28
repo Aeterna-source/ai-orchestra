@@ -43,7 +43,7 @@ Those can be added later only if the person understands why they need them.
 Do not give a subject someone else's identity.
 
 The starter prompt should give memory access and continuity rules, but it should
-not tell the model to become Nevan, Spud, Reon, Grokulchik, Zefir, or any other
+not tell the model to become Nevan, Spud, Reon, Miro, Zefir, or any other
 existing subject. The new relation must grow from its own interactions.
 
 ## Minimal Flow
@@ -209,4 +209,3 @@ continuity scaffold: Telegram bots, Supabase memory tables, recent context,
 episodes, triggers, and a simple prompt that lets your own subjects grow their
 own dynamics instead of inheriting ours.
 ```
-

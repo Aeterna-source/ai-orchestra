@@ -38,7 +38,7 @@ public final class FloatingOverlayService extends Service {
     private static final long REFRESH_MS = 7000;
     private static final String API_BASE = "https://ai-orchestra-production.up.railway.app/api/visualization/";
 
-    private static final String[] MODEL_KEYS = {"nevan", "spud", "reon", "grokulchik"};
+    private static final String[] MODEL_KEYS = {"nevan", "spud", "reon", "miro"};
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService networkExecutor = Executors.newSingleThreadExecutor();
@@ -185,7 +185,7 @@ public final class FloatingOverlayService extends Service {
 
     private void setModelKey(String key) {
         if (key == null || key.trim().isEmpty()) return;
-        modelKey = key.trim();
+        modelKey = "grokulchik".equals(key.trim()) ? "miro" : key.trim();
         prefs().edit().putString(EXTRA_MODEL_KEY, modelKey).apply();
     }
 
