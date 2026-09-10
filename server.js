@@ -1842,8 +1842,8 @@ function resolveProfileKey(value = "") {
   return modelEntry?.[1]?.profile || null;
 }
 
-async function loadCognitiveContext(profile) {
-  if (!COGNITIVE_OS_ENABLED || !COGNITIVE_OS_CONTEXT_ENABLED) {
+async function loadCognitiveContext(profile, allowPrivate = true) {
+  if (!allowPrivate || !COGNITIVE_OS_ENABLED || !COGNITIVE_OS_CONTEXT_ENABLED) {
     return {
       stateCards: [],
       intentions: [],
@@ -2396,8 +2396,8 @@ function formatCoreInterpreterContext({ activeNodes = [], availableNodes = [] } 
   return sections.join("\n").trim();
 }
 
-async function loadCoreContext(profile, { userMessage = "", triggerName = "", cognitiveContext = null } = {}) {
-  if (!CORE_OS_ENABLED || !CORE_OS_CONTEXT_ENABLED) {
+async function loadCoreContext(profile, { userMessage = "", triggerName = "", cognitiveContext = null, allowPrivate = true } = {}) {
+  if (!allowPrivate || !CORE_OS_ENABLED || !CORE_OS_CONTEXT_ENABLED) {
     return {
       activeNodes: [],
       availableNodes: [],
@@ -2906,8 +2906,8 @@ async function loadSubjectSpaceArchive(profile, requestType = "evolution") {
   };
 }
 
-async function loadSubjectSpaceContext(profile) {
-  if (!SUBJECT_SPACE_OS_ENABLED || !SUBJECT_SPACE_CONTEXT_ENABLED || !profile) {
+async function loadSubjectSpaceContext(profile, allowPrivate = true) {
+  if (!allowPrivate || !SUBJECT_SPACE_OS_ENABLED || !SUBJECT_SPACE_CONTEXT_ENABLED || !profile) {
     return {
       space: null,
       nodes: [],
@@ -3206,6 +3206,8 @@ async function recordCognitiveEvent({
 }
 
 async function enqueueCognitiveInterpretation({ event, modelConfig, model, remember }) {
+  // Group history is stored separately; it must not rewrite private profiles.
+  if (event?.chat_scope !== 'private') return null;
   if (!COGNITIVE_OS_ENABLED || !COGNITIVE_OS_AUTO_INTERPRET || !event?.id) return null;
   if (COGNITIVE_OS_INTERPRET_REMEMBER_ONLY && !remember) return null;
 
@@ -4961,9 +4963,9 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     build: {
-      continuityRepairVersion: "2026-09-10-webhook-v2",
+      continuityRepairVersion: "2026-09-10-continuity-v3",
       telegramWebhookAuthentication: true,
-      derivedMemoryMode: process.env.DERIVED_MEMORY_MODE || "shadow",
+      derivedMemoryMode: process.env.DERIVED_MEMORY_MODE || "live",
       telegramDeliveryLogs: true,
       telegramApiRetries: true,
       xaiTriggerClassifierDefault: false,
@@ -5109,7 +5111,8 @@ async function generateChatReply({
 
   const modelConfig = resolveModelConfig(model);
   const tables = memoryTables[modelConfig.profile];
-  const triggerCatalog = await fetchTriggerCatalog(modelConfig.profile);
+  const allowPrivate = chatScope === 'private';
+  const triggerCatalog = allowPrivate ? await fetchTriggerCatalog(modelConfig.profile) : [];
   const debugInfo = createDebugInfo(model, modelConfig, triggerCatalog);
   debugInfo.imageInputs = imageInputs.length;
 
@@ -5120,7 +5123,7 @@ async function generateChatReply({
   let triggerName = detectStaticTrigger(userMessage, triggerCatalog);
   debugInfo.exactTriggerName = triggerName;
 
-  if (!triggerName && shouldUseTriggerClassifier(modelConfig)) {
+  if (allowPrivate && !triggerName && shouldUseTriggerClassifier(modelConfig)) {
     triggerName = await resolveTriggerWithModel({
       modelConfig,
       userMessage,
@@ -5171,12 +5174,12 @@ async function generateChatReply({
   debugInfo.fallbackFullCount = fallbackContext.fullCount;
   debugInfo.fallbackCompactCount = fallbackContext.compactCount;
 
-  const cognitiveContext = await loadCognitiveContext(modelConfig.profile);
+  const cognitiveContext = await loadCognitiveContext(modelConfig.profile, allowPrivate);
   const derivedMemory = await loadDerivedMemory(supabase, {
     profile: modelConfig.profile, source, chatScope, telegram,
     query: userMessage, trigger: activeTriggerName || triggerName,
     mode: COGNITIVE_OS_ENABLED && COGNITIVE_OS_CONTEXT_ENABLED
-      ? process.env.DERIVED_MEMORY_MODE || "shadow" : "off"
+      ? process.env.DERIVED_MEMORY_MODE || "live" : "off"
   });
   cognitiveContext.derivedMemory = {
     mode: derivedMemory.mode, status: derivedMemory.status,
@@ -5189,6 +5192,7 @@ async function generateChatReply({
   debugInfo.cognitiveStateVectors = cognitiveContext.stateVectors.length;
   const cognitivePromptForChat = buildCognitivePromptForChat(modelConfig, cognitiveContext);
   const coreContext = await loadCoreContext(modelConfig.profile, {
+    allowPrivate,
     userMessage,
     triggerName: activeTriggerName || triggerName,
     cognitiveContext
@@ -5197,7 +5201,7 @@ async function generateChatReply({
   debugInfo.coreActiveNodes = coreContext.activeNodes.length;
   debugInfo.coreAvailableNodes = coreContext.availableNodes.length;
   const corePromptForChat = buildCorePromptForChat(modelConfig, coreContext);
-  const subjectSpaceContext = await loadSubjectSpaceContext(modelConfig.profile);
+  const subjectSpaceContext = await loadSubjectSpaceContext(modelConfig.profile, allowPrivate);
   debugInfo.subjectSpaceNodes = subjectSpaceContext.nodes.length;
   debugInfo.subjectSpaceEdges = subjectSpaceContext.edges.length;
   debugInfo.subjectSpaceObjects = subjectSpaceContext.objects.length;
@@ -5381,7 +5385,7 @@ async function generateChatReply({
   debugInfo.requestedTriggerName = requestedTrigger;
   debugInfo.requestedSpaceType = initialRequestedSpaceType || null;
 
-  if (requestedTrigger) {
+  if (allowPrivate && requestedTrigger) {
     const bundle = await fetchMemoryBundle(
       modelConfig.profile,
       requestedTrigger,
@@ -5427,7 +5431,7 @@ async function generateChatReply({
   const requestedCoreKey = extractCoreRequest(reply, coreContext.availableNodes) || initialRequestedCoreKey;
   debugInfo.requestedCoreKey = requestedCoreKey || null;
 
-  if (requestedCoreKey) {
+  if (allowPrivate && requestedCoreKey) {
     const coreNode = await fetchCoreNode(modelConfig.profile, requestedCoreKey);
 
     await logCoreRequest({
@@ -5474,7 +5478,7 @@ async function generateChatReply({
   const requestedSpaceType = extractSubjectSpaceRequest(reply) || initialRequestedSpaceType;
   debugInfo.requestedSpaceType = requestedSpaceType || null;
 
-  if (requestedSpaceType) {
+  if (allowPrivate && requestedSpaceType) {
     const requestedSpaceArchive = await loadSubjectSpaceArchive(modelConfig.profile, requestedSpaceType);
 
     if (requestedSpaceArchive.prompt) {
@@ -5514,7 +5518,7 @@ async function generateChatReply({
   debugInfo.remember = remember;
   debugInfo.rememberSource = remember ? "model_tag" : "none";
 
-  if (rememberDirective.triggerName) {
+  if (allowPrivate && rememberDirective.triggerName) {
     const bundle = await fetchMemoryBundle(
       modelConfig.profile,
       rememberDirective.triggerName,

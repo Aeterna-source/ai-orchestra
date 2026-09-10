@@ -2,6 +2,15 @@ import { webhookSecret } from '../lib/telegram-auth.js';
 const base = 'https://ai-orchestra-production.up.railway.app';
 const health = await (await fetch(`${base}/api/health`)).json();
 console.log(JSON.stringify({ version: health.build?.continuityRepairVersion, mode: health.build?.derivedMemoryMode }));
+if (process.env.TELEGRAM_ADMIN_SECRET) {
+  for (const profile of ['Nevan','Spud','Miro','Reon','Zefir']) {
+    const response = await fetch(`${base}/api/cognitive/retrieval-check`, { method: 'POST', headers: {
+      'Content-Type':'application/json','X-Telegram-Admin-Secret':process.env.TELEGRAM_ADMIN_SECRET
+    }, body: JSON.stringify({ profile }) });
+    if (response.ok) console.log(JSON.stringify(await response.json()));
+    else { console.log(JSON.stringify({ profile, retrievalCheckStatus:response.status })); process.exitCode = 1; }
+  }
+}
 for (const [key, variable] of [['nevan','TELEGRAM_NEVAN_TOKEN'],['spud','TELEGRAM_SPUD_TOKEN'],['grokulchik','TELEGRAM_GROKULCHIK_TOKEN'],['reon','TELEGRAM_REON_TOKEN']]) {
   const token = process.env[variable];
   if (!token) continue;
