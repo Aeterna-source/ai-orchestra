@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
+import { loadDerivedMemory } from "./lib/derived-memory.js";
 
 dotenv.config();
 
@@ -3120,6 +3121,7 @@ async function logContextPacket({
         metaMemory: cognitiveContext.metaMemory || [],
         stateVectors: cognitiveContext.stateVectors || [],
         latestSnapshot: cognitiveContext.latestSnapshot || null,
+        derivedMemory: cognitiveContext.derivedMemory || null,
         core: {
           activeModes: coreContext?.activeModes || [],
           activeNodes: coreContext?.activeNodes || [],
@@ -3319,6 +3321,11 @@ async function processCognitiveJob(job) {
     }
 
     const interpretation = await interpretCognitiveEvent(event);
+    // A parse failure is not an empty but successful interpretation.
+    // Reject it before materializing snapshots or other derived memory.
+    if (!interpretation || interpretation.parsed === false) {
+      throw new Error("Cognitive interpretation could not be parsed");
+    }
     const stored = await storeCognitiveInterpretation({
       event,
       job: claimed,
@@ -4949,6 +4956,8 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     build: {
+      continuityRepairVersion: "2026-09-10-derived-memory-v1",
+      derivedMemoryMode: process.env.DERIVED_MEMORY_MODE || "shadow",
       telegramDeliveryLogs: true,
       telegramApiRetries: true,
       xaiTriggerClassifierDefault: false,
@@ -5157,6 +5166,17 @@ async function generateChatReply({
   debugInfo.fallbackCompactCount = fallbackContext.compactCount;
 
   const cognitiveContext = await loadCognitiveContext(modelConfig.profile);
+  const derivedMemory = await loadDerivedMemory(supabase, {
+    profile: modelConfig.profile, source, chatScope, telegram,
+    query: userMessage, trigger: activeTriggerName || triggerName,
+    mode: COGNITIVE_OS_ENABLED && COGNITIVE_OS_CONTEXT_ENABLED
+      ? process.env.DERIVED_MEMORY_MODE || "shadow" : "off"
+  });
+  cognitiveContext.derivedMemory = {
+    mode: derivedMemory.mode, status: derivedMemory.status,
+    selected: derivedMemory.records.map(({ text, ...reference }) => reference)
+  };
+  debugInfo.derivedMemory = cognitiveContext.derivedMemory;
   debugInfo.cognitiveStateCards = cognitiveContext.stateCards.length;
   debugInfo.cognitiveIntentions = cognitiveContext.intentions.length;
   debugInfo.cognitiveMetaMemory = cognitiveContext.metaMemory.length;
@@ -5207,6 +5227,7 @@ async function generateChatReply({
     { role: "system", content: buildSystemPrompt(modelConfig) },
     { role: "system", content: buildMemoryProtocolPromptForChat(modelConfig, triggerCatalog) },
     ...(cognitivePromptForChat ? [{ role: "system", content: cognitivePromptForChat }] : []),
+    ...(derivedMemory.prompt ? [{ role: "system", content: derivedMemory.prompt }] : []),
     ...(corePromptForChat ? [{ role: "system", content: corePromptForChat }] : []),
     ...(subjectSpacePromptForChat ? [{ role: "system", content: subjectSpacePromptForChat }] : []),
     ...(miroDecompressionPrompt ? [{ role: "system", content: miroDecompressionPrompt }] : []),
@@ -5572,7 +5593,11 @@ async function generateChatReply({
 
 app.post("/api/chat", async (req, res) => {
   try {
-    const result = await generateChatReply(req.body);
+    const result = await generateChatReply({
+      ...req.body,
+      source: "api",
+      telegram: null
+    });
     res.json(result);
   } catch (err) {
     console.error(err);
