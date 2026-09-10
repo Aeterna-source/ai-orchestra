@@ -52,3 +52,13 @@ test('group, unauthenticated API and disabled modes perform no database queries'
     assert.notEqual(result.status, 'unavailable'); assert.equal(result.prompt, '');
   }
 });
+
+test('full archive candidates are still source checked before injection', async () => {
+  const db = database();
+  db.rpc = async (name, params) => {
+    assert.equal(name, 'search_derived_memory'); assert.equal(params.p_profile,'A');
+    return {data:[row,{...row,id:8,derived_from_event_ids:[999],content:'квіти secret'}]};
+  };
+  const result = await loadDerivedMemory(db,{...options,mode:'live'});
+  assert.equal(result.records.length,1);assert.equal(result.prompt.includes('secret'),false);
+});

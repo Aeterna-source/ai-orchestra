@@ -7,6 +7,7 @@ import { webhookSecret, verifyWebhook, secureExistingWebhook } from "./lib/teleg
 import { writeIntention } from "./lib/intentions.js";
 import { requestManifest } from "./lib/request-manifest.js";
 import { validInterpretation } from "./lib/interpretation-schema.js";
+import { receiveUpdate, drainUpdates } from "./lib/telegram-inbox.js";
 
 dotenv.config();
 
@@ -4986,7 +4987,7 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     build: {
-      continuityRepairVersion: "2026-09-10-continuity-v4",
+      continuityRepairVersion: "2026-09-10-continuity-v5",
       telegramWebhookAuthentication: true,
       derivedMemoryMode: process.env.DERIVED_MEMORY_MODE || "live",
       telegramDeliveryLogs: true,
@@ -6146,7 +6147,7 @@ async function sendTelegramReply(botConfig, message, text) {
     });
 
     if (!delivery.ok) {
-      continue;
+      throw new Error('Telegram reply chunk delivery failed');
     }
 
     const sent = delivery.result;
@@ -6342,6 +6343,7 @@ async function handleTelegramUpdate(botConfig, update) {
 
     await logTelegramProcessing({ botConfig, message, phase: "before_send" });
     const sent = await sendTelegramReply(botConfig, message, result.reply || "");
+    if (!sent) throw new Error('Telegram reply was not delivered');
     await logTelegramProcessing({
       botConfig,
       message,
@@ -6365,6 +6367,15 @@ async function handleTelegramUpdate(botConfig, update) {
   }
 }
 
+let telegramInboxRunning = false;
+async function processTelegramInbox() {
+  if (telegramInboxRunning) return;
+  telegramInboxRunning = true;
+  try { await drainUpdates(supabase, telegramBotsByKey, handleTelegramUpdate); }
+  catch (error) { console.error('[TELEGRAM INBOX]', error.message); }
+  finally { telegramInboxRunning = false; }
+}
+
 app.post("/telegram/:botKey", async (req, res) => {
   const botConfig = telegramBotsByKey.get(req.params.botKey);
   if (!botConfig) {
@@ -6375,14 +6386,11 @@ app.post("/telegram/:botKey", async (req, res) => {
     return res.status(403).json({ error: "Invalid webhook origin" });
   }
 
-  res.sendStatus(200);
-
-  handleTelegramUpdate(botConfig, req.body).catch((err) => {
-    console.error("[TELEGRAM UPDATE ERROR]", {
-      bot: botConfig.key,
-      error: err.message
-    });
-  });
+  try {
+    const stored = await receiveUpdate(supabase, botConfig.key, req.body);
+    res.sendStatus(200);
+    if (stored) void processTelegramInbox();
+  } catch { res.status(503).json({error:'Update persistence unavailable'}); }
 });
 
 app.get("/api/telegram/bots", (_req, res) => {
@@ -6437,6 +6445,8 @@ if (COGNITIVE_OS_ENABLED && COGNITIVE_OS_WORKER_ENABLED) {
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  setInterval(() => void processTelegramInbox(), 10000);
+  void processTelegramInbox();
   // Preserve each registered URL and its pending updates. Telegram retries any
   // deliveries rejected during the brief registration transition.
   Promise.allSettled(telegramBots.map(bot => secureExistingWebhook(bot, telegramApi)))
