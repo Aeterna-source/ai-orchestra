@@ -3324,8 +3324,12 @@ async function claimCognitiveJob(job) {
 async function processCognitiveJob(job) {
   const claimed = await claimCognitiveJob(job);
   if (!claimed) return;
+  let materializationStarted = Boolean(claimed.result?.materializationStarted);
 
   try {
+    if (materializationStarted) {
+      throw new Error('Prior materialization requires inspection before replay');
+    }
     const { data: event, error: eventError } = await supabase
       .from("os_events")
       .select("*")
@@ -3342,6 +3346,15 @@ async function processCognitiveJob(job) {
     if (!interpretation || interpretation.parsed === false) {
       throw new Error("Cognitive interpretation could not be parsed");
     }
+    // Persist the expensive interpretation before any derived writes. A transport
+    // error here is ambiguous, so do not automatically replay this attempt.
+    materializationStarted = true;
+    const checkpoint = await supabase.from('os_jobs').update({
+      result: { materializationStarted: true, interpretation },
+      updated_at: new Date().toISOString()
+    }).eq('id', claimed.id).eq('status', 'running')
+      .eq('locked_at', claimed.locked_at).select('id').maybeSingle();
+    if (checkpoint.error || !checkpoint.data) throw new Error('Cognitive checkpoint not confirmed or worker lease lost');
     const stored = await storeCognitiveInterpretation({
       event,
       job: claimed,
@@ -3360,6 +3373,8 @@ async function processCognitiveJob(job) {
         status: "completed",
         result: {
           parsed: interpretation.parsed !== false,
+          materializationStarted: true,
+          interpretation,
           significance: clamp01(interpretation.significance, 0),
           stored,
           postInterpretRemember
@@ -3368,14 +3383,15 @@ async function processCognitiveJob(job) {
         completed_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       })
-      .eq("id", claimed.id);
-    if (completion?.error) {
+      .eq("id", claimed.id).eq('status', 'running').eq('locked_at', claimed.locked_at)
+      .select('id').maybeSingle();
+    if (completion?.error || !completion?.data) {
       const error = new Error("Cognitive completion status write failed");
       error.retryable = false;
       throw error;
     }
   } catch (err) {
-    const canRetry = err.retryable !== false && (claimed.attempts || 1) < (claimed.max_attempts || 3);
+    const canRetry = !materializationStarted && err.retryable !== false && (claimed.attempts || 1) < (claimed.max_attempts || 3);
     const status = canRetry ? "retry" : "failed";
     const delayMs = Math.min(15 * 60 * 1000, 60 * 1000 * (claimed.attempts || 1));
 
@@ -3387,7 +3403,7 @@ async function processCognitiveJob(job) {
         run_after: new Date(Date.now() + delayMs).toISOString(),
         updated_at: new Date().toISOString()
       })
-      .eq("id", claimed.id);
+      .eq("id", claimed.id).eq('status', 'running').eq('locked_at', claimed.locked_at);
 
     console.log("[COGNITIVE JOB FAILED]", {
       jobId: claimed.id,
@@ -3668,7 +3684,7 @@ async function upsertCoreNode({ profile, event, job, node }) {
 
     if (updateError) {
       console.log("[CORE NODE UPDATE ERROR]", formatSupabaseError(updateError));
-      return null;
+      throw new Error("CORE NODE UPDATE failed");
     }
 
     if (updated) return updated;
@@ -3682,7 +3698,7 @@ async function upsertCoreNode({ profile, event, job, node }) {
 
   if (error) {
     console.log("[CORE NODE INSERT ERROR]", formatSupabaseError(error));
-    return null;
+    throw new Error("CORE NODE INSERT failed");
   }
 
   return data;
@@ -3745,7 +3761,7 @@ async function upsertSubjectSpaceNode({ profile, event, job, action }) {
 
   if (beforeError) {
     console.log("[SUBJECT SPACE NODE LOAD ERROR]", formatSupabaseError(beforeError));
-    return null;
+    throw new Error("SUBJECT SPACE NODE LOAD failed");
   }
 
   const archived = actionType === "archive";
@@ -3792,7 +3808,7 @@ async function upsertSubjectSpaceNode({ profile, event, job, action }) {
 
   if (error) {
     console.log("[SUBJECT SPACE NODE UPSERT ERROR]", formatSupabaseError(error));
-    return null;
+    throw new Error("SUBJECT SPACE NODE UPSERT failed");
   }
 
   await recordSubjectSpaceChange({
@@ -3834,7 +3850,7 @@ async function upsertSubjectSpaceEdge({ profile, event, job, action }) {
 
   if (beforeError) {
     console.log("[SUBJECT SPACE EDGE LOAD ERROR]", formatSupabaseError(beforeError));
-    return null;
+    throw new Error("SUBJECT SPACE EDGE LOAD failed");
   }
 
   const now = new Date().toISOString();
@@ -3867,7 +3883,7 @@ async function upsertSubjectSpaceEdge({ profile, event, job, action }) {
 
   if (error) {
     console.log("[SUBJECT SPACE EDGE UPSERT ERROR]", formatSupabaseError(error));
-    return null;
+    throw new Error("SUBJECT SPACE EDGE UPSERT failed");
   }
 
   await recordSubjectSpaceChange({
@@ -3908,7 +3924,7 @@ async function upsertSubjectSpaceObject({ profile, event, job, object }) {
 
   if (beforeError) {
     console.log("[SUBJECT SPACE OBJECT LOAD ERROR]", formatSupabaseError(beforeError));
-    return null;
+    throw new Error("SUBJECT SPACE OBJECT LOAD failed");
   }
 
   const now = new Date().toISOString();
@@ -3955,7 +3971,7 @@ async function upsertSubjectSpaceObject({ profile, event, job, object }) {
 
   if (error) {
     console.log("[SUBJECT SPACE OBJECT UPSERT ERROR]", formatSupabaseError(error));
-    return null;
+    throw new Error("SUBJECT SPACE OBJECT UPSERT failed");
   }
 
   await recordSubjectSpaceChange({
@@ -3996,7 +4012,7 @@ async function upsertSubjectSpaceThread({ profile, event, job, thread }) {
 
   if (beforeError) {
     console.log("[SUBJECT SPACE THREAD LOAD ERROR]", formatSupabaseError(beforeError));
-    return null;
+    throw new Error("SUBJECT SPACE THREAD LOAD failed");
   }
 
   const now = new Date().toISOString();
@@ -4039,7 +4055,7 @@ async function upsertSubjectSpaceThread({ profile, event, job, thread }) {
 
   if (error) {
     console.log("[SUBJECT SPACE THREAD UPSERT ERROR]", formatSupabaseError(error));
-    return null;
+    throw new Error("SUBJECT SPACE THREAD UPSERT failed");
   }
 
   await recordSubjectSpaceChange({
@@ -4085,7 +4101,7 @@ async function upsertSubjectSpaceRelation({ profile, event, job, relation }) {
 
   if (beforeError) {
     console.log("[SUBJECT SPACE RELATION LOAD ERROR]", formatSupabaseError(beforeError));
-    return null;
+    throw new Error("SUBJECT SPACE RELATION LOAD failed");
   }
 
   const now = new Date().toISOString();
@@ -4124,7 +4140,7 @@ async function upsertSubjectSpaceRelation({ profile, event, job, relation }) {
 
   if (error) {
     console.log("[SUBJECT SPACE RELATION UPSERT ERROR]", formatSupabaseError(error));
-    return null;
+    throw new Error("SUBJECT SPACE RELATION UPSERT failed");
   }
 
   await recordSubjectSpaceChange({
@@ -4995,7 +5011,7 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     build: {
-      continuityRepairVersion: "2026-09-10-continuity-v6",
+      continuityRepairVersion: "2026-09-10-continuity-v7",
       telegramWebhookAuthentication: true,
       derivedMemoryMode: process.env.DERIVED_MEMORY_MODE || "live",
       telegramDeliveryLogs: true,

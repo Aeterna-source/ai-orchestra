@@ -46,3 +46,12 @@ Limitations: bounded lexical/trigger retrieval is not semantic search over the f
 Build retrieval in shadow mode first, with no change to profile responses. Carry profile and chat scope into candidate selection; check source event audience before selecting derived records. Record selected IDs and source IDs, use bounded previews, and test that unrelated profiles and private events cannot enter group context. Review results before enabling retrieval for a selected profile. Preserve Core and subject-space contents.
 
 Separately add explicit target intention ID and version handling; do not infer which old intention to close from similar text. Do not bulk close or merge the existing 406 update rows.
+
+## v7 — materialization failure boundaries (2026-09-10)
+
+- Persist the parsed interpretation in the job result before derived writes begin.
+- Any error after that boundary fails the job without automatic replay, including unclassified transport errors and post-interpretation failures.
+- Requeued checkpointed jobs require inspection; completion/failure transitions are guarded by running status and the claim timestamp.
+- Core and subject-space database errors propagate instead of silently reporting partial success.
+- Validation: 32 Node tests pass; syntax and diff checks pass. Production verification recorded after deployment.
+- Limits: this is a durable checkpoint and conservative replay guard, not an atomic multi-table transaction. A process interruption may still leave partial records requiring inspection. Core proposal acceptance and transactional recovery remain unfinished.

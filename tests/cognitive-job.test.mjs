@@ -7,22 +7,31 @@ import vm from 'node:vm';
 const server = readFileSync(new URL('../server.js', import.meta.url), 'utf8');
 const source = server.slice(server.indexOf('async function processCognitiveJob(job)'), server.indexOf('async function interpretCognitiveEvent(event)'));
 
-async function run(interpretation, attempts = 1, writeFailure = false) {
+async function run(interpretation, attempts = 1, writeFailure = false, options = {}) {
   const updates = [];
   let writes = 0;
   let remembers = 0;
   const context = vm.createContext({
-    claimCognitiveJob: async () => ({ id: 7, event_id: 9, attempts, max_attempts: 3 }),
+    claimCognitiveJob: async () => ({ id: 7, event_id: 9, attempts, max_attempts: 3, locked_at: 'lease', result: options.priorResult }),
     supabase: { from(table) {
       if (table === 'os_events') return { select: () => ({ eq: () => ({ single: async () => ({ data: { id: 9 } }) }) }) };
       assert.equal(table, 'os_jobs');
-      return { update: (value) => ({ eq: async (key, id) => {
-        assert.equal(key, 'id'); assert.equal(id, 7); updates.push(value);
-      } }) };
+      return { update(value) {
+        updates.push(value);
+        const filters = {};
+        const result = () => {
+          assert.equal(filters.id, 7);
+          assert.equal(filters.status, 'running');
+          assert.equal(filters.locked_at, 'lease');
+          return { data: options.checkpointFailure && value.result?.interpretation ? null : { id: 7 } };
+        };
+        return { eq(key, val) { filters[key] = val; return this; }, select() { return this; },
+          maybeSingle: async () => result(), then(resolve) { return Promise.resolve(result()).then(resolve); } };
+      } };
     } },
     interpretCognitiveEvent: async () => interpretation,
-    storeCognitiveInterpretation: async () => { writes++; if (writeFailure) { const error = new Error('partial write'); error.retryable = false; throw error; } return { atoms: 1 }; },
-    maybePostInterpretRemember: async () => { remembers++; return {}; },
+    storeCognitiveInterpretation: async () => { writes++; if (writeFailure) throw new Error('partial write'); return { atoms: 1 }; },
+    maybePostInterpretRemember: async () => { remembers++; if (options.rememberFailure) throw new Error('remember failed'); return {}; },
     clamp01: (value, fallback) => value ?? fallback,
     console: { log() {} }
   });
@@ -49,11 +58,30 @@ test('valid interpretation retains normal materialization and completion', async
   const result = await run({ significance: 0.7 });
   assert.equal(result.writes, 1);
   assert.equal(result.remembers, 1);
-  assert.equal(result.updates[0].status, 'completed');
+  assert.equal(result.updates[0].result.materializationStarted, true);
+  assert.equal(result.updates.at(-1).status, 'completed');
 });
 
 test('partial materialization fails without repeating already-written records', async () => {
   const result = await run({ significance: 0.7 }, 1, true);
-  assert.equal(result.updates[0].status, 'failed');
+  assert.equal(result.updates.at(-1).status, 'failed');
   assert.equal(result.remembers, 0);
+});
+
+test('failure after materialization never retries successful derived writes', async () => {
+  const result = await run({ significance: 0.7 }, 1, false, { rememberFailure: true });
+  assert.equal(result.writes, 1);
+  assert.equal(result.updates.at(-1).status, 'failed');
+});
+
+test('unconfirmed checkpoint prevents all materialization', async () => {
+  const result = await run({ significance: 0.7 }, 1, false, { checkpointFailure: true });
+  assert.equal(result.writes, 0);
+  assert.equal(result.updates.at(-1).status, 'failed');
+});
+
+test('manually requeued partial job cannot silently duplicate records', async () => {
+  const result = await run({ significance: 0.7 }, 1, false, { priorResult: { materializationStarted: true } });
+  assert.equal(result.writes, 0);
+  assert.equal(result.updates.at(-1).status, 'failed');
 });
