@@ -55,3 +55,14 @@ Separately add explicit target intention ID and version handling; do not infer w
 - Core and subject-space database errors propagate instead of silently reporting partial success.
 - Validation: 32 Node tests pass; syntax and diff checks pass. Production verification recorded after deployment.
 - Limits: this is a durable checkpoint and conservative replay guard, not an atomic multi-table transaction. A process interruption may still leave partial records requiring inspection. Core proposal acceptance and transactional recovery remain unfinished.
+
+## v8 — resumable writes and reviewed Core (2026-09-10)
+
+- `continuity_job_steps` journals every materialization read and write. Each database operation and its receipt commit together. Replays return the original response, preserving branches after prior writes.
+- Job checkpoints preserve the original event and interpretation. Resumption does not call the interpreter again. Materialization and episodic persistence have independent versioned step sequences.
+- Claims and manual resumes serialize per profile in SQL. Expired journaled jobs retry within the attempt budget; older unjournaled failures remain manual. A failed job cannot resume after newer work started, because that requires semantic reconciliation.
+- Interpreter Core writes now produce pending proposals with the exact prior row, proposed row and source event/job. `/core-review` provides authenticated before/after review. Accept/reject is atomic, repeated decisions are idempotent, stale baselines are superseded, and accepted writes retain the existing revision audit.
+- This is per-step resumability, not one transaction for the entire interpretation. Do not change journaled execution order or feature flags while incomplete v1 jobs exist without a versioned migration. Preserve v1 handlers for outstanding jobs when introducing a new sequence.
+- Added service-only RLS tables/functions. Security advisor uncovered legacy public SQL execution and 24 unprotected legacy tables; revoked anonymous SQL access and protected legacy memory/log tables. Verified server retrieval still works.
+- Validation: 36 Node tests; live SQL tests in rollback transactions cover repeated inserts, lost/expired leases, typed filters, upsert, mutation rollback, Core accept/replay/stale rejection, queue ordering and stale resume refusal. No synthetic records retained. No paid model calls or Telegram messages sent by verification.
+- Historical partial writes without a journal are not guessed or replayed. Core review currently records Nadine's operator decision; autonomous subject acceptance is not implemented or impersonated.

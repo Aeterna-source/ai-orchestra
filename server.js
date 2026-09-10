@@ -1,4 +1,5 @@
 import express from "express";
+import { fileURLToPath } from 'node:url';
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
@@ -7,6 +8,7 @@ import { webhookSecret, verifyWebhook, secureExistingWebhook } from "./lib/teleg
 import { writeIntention, prioritizeReviews } from "./lib/intentions.js";
 import { requestManifest } from "./lib/request-manifest.js";
 import { validInterpretation } from "./lib/interpretation-schema.js";
+import { durableDatabase } from "./lib/durable-db.js";
 import { receiveUpdate, drainUpdates } from "./lib/telegram-inbox.js";
 
 dotenv.config();
@@ -28,11 +30,12 @@ if (!process.env.OPENAI_API_KEY) {
   throw new Error("Missing OPENAI_API_KEY");
 }
 
-const supabase = createClient(
+const rawSupabase = createClient(
   process.env.SUPABASE_URL,
   supabaseServerKey
 );
 
+const { db: supabase, run: runDurable } = durableDatabase(rawSupabase);
 const DEFAULT_RESPONSE_TOKEN_LIMIT = 6000;
 
 function parsePositiveInteger(value, fallback = null) {
@@ -3259,10 +3262,7 @@ async function processCognitiveJobs({ jobId = null, limit = COGNITIVE_OS_JOB_BAT
   cognitiveWorkerRunning = true;
 
   try {
-    const recovery = await supabase.from('os_jobs').update({
-      status: 'failed', error: 'Worker lease expired; inspect partial writes before replay',
-      updated_at: new Date().toISOString()
-    }).eq('status', 'running').lt('locked_at', new Date(Date.now() - 30 * 60 * 1000).toISOString());
+    const recovery = await supabase.rpc('recover_continuity_jobs');
     if (recovery.error) throw new Error('Cognitive lease recovery failed');
     let query = supabase
       .from("os_jobs")
@@ -3296,38 +3296,17 @@ async function processCognitiveJobs({ jobId = null, limit = COGNITIVE_OS_JOB_BAT
 }
 
 async function claimCognitiveJob(job) {
-  const earlier = await supabase.from('os_jobs').select('id')
-    .eq('profile', job.profile).lt('id', job.id)
-    .in('status', ['queued', 'retry', 'running']).limit(1);
-  if (earlier.error || earlier.data?.length) return null;
-  const { data, error } = await supabase
-    .from("os_jobs")
-    .update({
-      status: "running",
-      attempts: (job.attempts || 0) + 1,
-      locked_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    })
-    .eq("id", job.id)
-    .in("status", ["queued", "retry"])
-    .select("*")
-    .maybeSingle();
-
-  if (error) {
-    console.log("[COGNITIVE JOB CLAIM ERROR]", formatSupabaseError(error));
-    return null;
-  }
-
-  return data;
+  const result = await supabase.rpc('claim_continuity_job', {p_id:job.id});
+  if (result.error) { console.log('[COGNITIVE CLAIM FAILED]'); return null; }
+  return result.data;
 }
-
 async function processCognitiveJob(job) {
   const claimed = await claimCognitiveJob(job);
   if (!claimed) return;
   let materializationStarted = Boolean(claimed.result?.materializationStarted);
 
   try {
-    if (materializationStarted) {
+    if (materializationStarted && claimed.result?.journalVersion !== 1) {
       throw new Error('Prior materialization requires inspection before replay');
     }
     const { data: event, error: eventError } = await supabase
@@ -3340,7 +3319,8 @@ async function processCognitiveJob(job) {
       throw new Error(`Cognitive event not found: ${claimed.event_id}`);
     }
 
-    const interpretation = await interpretCognitiveEvent(event);
+    const sourceEvent = claimed.result?.event || event;
+    const interpretation = claimed.result?.interpretation || await interpretCognitiveEvent(sourceEvent);
     // A parse failure is not an empty but successful interpretation.
     // Reject it before materializing snapshots or other derived memory.
     if (!interpretation || interpretation.parsed === false) {
@@ -3350,22 +3330,26 @@ async function processCognitiveJob(job) {
     // error here is ambiguous, so do not automatically replay this attempt.
     materializationStarted = true;
     const checkpoint = await supabase.from('os_jobs').update({
-      result: { materializationStarted: true, interpretation },
+      result: { materializationStarted: true, journalVersion: 1, interpretation, event: sourceEvent },
       updated_at: new Date().toISOString()
     }).eq('id', claimed.id).eq('status', 'running')
       .eq('locked_at', claimed.locked_at).select('id').maybeSingle();
-    if (checkpoint.error || !checkpoint.data) throw new Error('Cognitive checkpoint not confirmed or worker lease lost');
-    const stored = await storeCognitiveInterpretation({
-      event,
+    if (checkpoint.error || !checkpoint.data) {
+      const error = new Error('Cognitive checkpoint not confirmed or worker lease lost');
+      error.durableFailure = true;
+      throw error;
+    }
+    const stored = await runDurable(claimed, "materialize-v1", () => storeCognitiveInterpretation({
+      event: sourceEvent,
       job: claimed,
       interpretation
-    });
-    const postInterpretRemember = await maybePostInterpretRemember({
-      event,
+    }));
+    const postInterpretRemember = await runDurable(claimed, "episode-v1", () => maybePostInterpretRemember({
+      event: sourceEvent,
       job: claimed,
       interpretation,
       stored
-    });
+    }));
 
     const completion = await supabase
       .from("os_jobs")
@@ -3374,6 +3358,8 @@ async function processCognitiveJob(job) {
         result: {
           parsed: interpretation.parsed !== false,
           materializationStarted: true,
+          journalVersion: 1,
+          event: sourceEvent,
           interpretation,
           significance: clamp01(interpretation.significance, 0),
           stored,
@@ -3387,11 +3373,11 @@ async function processCognitiveJob(job) {
       .select('id').maybeSingle();
     if (completion?.error || !completion?.data) {
       const error = new Error("Cognitive completion status write failed");
-      error.retryable = false;
+      error.durableFailure = true;
       throw error;
     }
   } catch (err) {
-    const canRetry = !materializationStarted && err.retryable !== false && (claimed.attempts || 1) < (claimed.max_attempts || 3);
+    const canRetry = (!materializationStarted || err.durableFailure === true) && err.retryable !== false && (claimed.attempts || 1) < (claimed.max_attempts || 3);
     const status = canRetry ? "retry" : "failed";
     const delayMs = Math.min(15 * 60 * 1000, 60 * 1000 * (claimed.attempts || 1));
 
@@ -3470,6 +3456,7 @@ Core is not an episode log. It is the subject's own small operating kernel: how 
 Prefer updating existing node_key values when possible. Good common keys are: snapshot, self_model, about_nadine, mode.normal, mode.vulnerable, mode.repair, mode.compression_repair, mode.creative, mode.technical, mode.transfer.
 Keep core_updates concise, operational, and portable. Avoid decorative vows unless the exchange itself establishes a durable relational anchor.
 Usually return "core_updates": [].
+These are proposals only. They do not change active Core until Nadine reviews the exact change. Do not claim the change is already applied.
 
 Hard rule: do not create subject_space_actions by default.
 Subject space is the subject-owned structural self-model: rooms, wings, private zones, routes, objects, rituals, tools, and access patterns that show how this subject organizes continuity.
@@ -3672,38 +3659,15 @@ async function upsertCoreNode({ profile, event, job, node }) {
     row.last_confirmed_at = new Date(node.last_confirmed_at).toISOString();
   }
 
-  if (status === "active") {
-    const { data: updated, error: updateError } = await supabase
-      .from("core_nodes")
-      .update(row)
-      .eq("profile", profile)
-      .eq("node_key", nodeKey)
-      .eq("status", "active")
-      .select("id")
-      .maybeSingle();
-
-    if (updateError) {
-      console.log("[CORE NODE UPDATE ERROR]", formatSupabaseError(updateError));
-      throw new Error("CORE NODE UPDATE failed");
-    }
-
-    if (updated) return updated;
-  }
-
-  const { data, error } = await supabase
-    .from("core_nodes")
-    .insert(row)
-    .select("id")
-    .single();
-
-  if (error) {
-    console.log("[CORE NODE INSERT ERROR]", formatSupabaseError(error));
-    throw new Error("CORE NODE INSERT failed");
-  }
-
-  return data;
+  const previous = await supabase.from('core_nodes').select('*').eq('profile', profile)
+    .eq('node_key', nodeKey).eq('status', 'active').maybeSingle();
+  if (previous.error) throw new Error('Core proposal baseline read failed');
+  return insertCognitiveRow('core_change_proposals', {
+    profile, node_key: nodeKey, source_job_id: job?.id || null,
+    source_event_id: event?.id || null, before_data: previous.data,
+    proposed_data: row, status: 'pending'
+  }, 'CORE PROPOSAL');
 }
-
 async function recordSubjectSpaceChange({
   profile,
   event,
@@ -4201,7 +4165,7 @@ function cognitiveSignalCount(stored = {}) {
     "metaMemory",
     "stateVectors",
     "transferNotes",
-    "coreUpdates",
+    "coreProposals",
     "spaceNodes",
     "spaceEdges",
     "spaceObjects",
@@ -4217,7 +4181,7 @@ function cognitiveStrongSignalCount(stored = {}) {
     "driftEvents",
     "metaMemory",
     "stateVectors",
-    "coreUpdates",
+    "coreProposals",
     "spaceThreads",
     "spaceRelations",
     "subjectProposals"
@@ -4443,6 +4407,7 @@ async function maybePostInterpretRemember({ event, job, interpretation, stored }
       trigger.id
     );
   } catch (err) {
+    if (err.durableFailure) throw err;
     console.log("[POST INTERPRET EPISODE SAVE FAILED]", {
       profile: event.profile,
       eventId: event.id,
@@ -4525,7 +4490,7 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
     metaMemory: 0,
     stateVectors: 0,
     transferNotes: 0,
-    coreUpdates: 0,
+    coreProposals: 0,
     spaceNodes: 0,
     spaceEdges: 0,
     spaceObjects: 0,
@@ -4774,7 +4739,7 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
       job,
       node
     });
-    if (inserted) stored.coreUpdates += 1;
+    if (inserted) stored.coreProposals += 1;
   }
 
   for (const action of asArray(interpretation.subject_space_actions).slice(0, 6)) {
@@ -5011,7 +4976,7 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     build: {
-      continuityRepairVersion: "2026-09-10-continuity-v7",
+      continuityRepairVersion: "2026-09-10-continuity-v8",
       telegramWebhookAuthentication: true,
       derivedMemoryMode: process.env.DERIVED_MEMORY_MODE || "live",
       telegramDeliveryLogs: true,
@@ -5683,6 +5648,29 @@ function isAdminRequest(req) {
   return provided === expected;
 }
 
+app.get('/core-review', (req, res) => res.sendFile(fileURLToPath(new URL('./frontend/core-review.html', import.meta.url))));
+app.get('/api/core-proposals/:profile', async (req, res) => {
+  if (!isAdminRequest(req)) return res.sendStatus(403);
+  if (!memoryTables[req.params.profile]) return res.sendStatus(404);
+  const result = await supabase.from('core_change_proposals').select('*')
+    .eq('profile', req.params.profile).eq('status', 'pending').order('id', { ascending: true }).limit(100);
+  if (result.error) return res.status(503).json({error:'Не вдалося прочитати пропозиції'});
+  res.json(result.data);
+});
+app.post('/api/core-proposals/:profile/:id', async (req, res) => {
+  if (!isAdminRequest(req)) return res.sendStatus(403);
+  if (!memoryTables[req.params.profile] || !/^\d+$/.test(req.params.id) || !['accepted','rejected'].includes(req.body.decision)) return res.sendStatus(400);
+  const result = await supabase.rpc('review_core_change', {p_id:req.params.id,p_profile:req.params.profile,p_decision:req.body.decision});
+  if (result.error) return res.status(409).json({error:'Не вдалося застосувати рішення. Онови список.'});
+  res.json(result.data);
+});
+app.post('/api/cognitive/jobs/:id/resume', async (req, res) => {
+  if (!isAdminRequest(req)) return res.sendStatus(403);
+  if (!/^\d+$/.test(req.params.id)) return res.sendStatus(400);
+  const result = await supabase.rpc('resume_continuity_job',{p_id:req.params.id});
+  if (result.error || !result.data) return res.status(409).json({error:'Resume unavailable: legacy job or newer work requires reconciliation'});
+  res.json({queued:true,id:result.data.id});
+});
 app.post("/api/cognitive/jobs/run", async (req, res) => {
   if (!isAdminRequest(req)) {
     return res.status(403).json({ error: "Bad or missing admin secret" });

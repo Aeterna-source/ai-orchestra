@@ -29,7 +29,8 @@ async function run(interpretation, attempts = 1, writeFailure = false, options =
           maybeSingle: async () => result(), then(resolve) { return Promise.resolve(result()).then(resolve); } };
       } };
     } },
-    interpretCognitiveEvent: async () => interpretation,
+    interpretCognitiveEvent: async () => { if (options.forbidInterpret) throw new Error('Unexpected model call'); return interpretation; },
+    runDurable: async (job, stage, fn) => fn(),
     storeCognitiveInterpretation: async () => { writes++; if (writeFailure) throw new Error('partial write'); return { atoms: 1 }; },
     maybePostInterpretRemember: async () => { remembers++; if (options.rememberFailure) throw new Error('remember failed'); return {}; },
     clamp01: (value, fallback) => value ?? fallback,
@@ -77,11 +78,19 @@ test('failure after materialization never retries successful derived writes', as
 test('unconfirmed checkpoint prevents all materialization', async () => {
   const result = await run({ significance: 0.7 }, 1, false, { checkpointFailure: true });
   assert.equal(result.writes, 0);
-  assert.equal(result.updates.at(-1).status, 'failed');
+  assert.equal(result.updates.at(-1).status, 'retry');
 });
 
 test('manually requeued partial job cannot silently duplicate records', async () => {
   const result = await run({ significance: 0.7 }, 1, false, { priorResult: { materializationStarted: true } });
   assert.equal(result.writes, 0);
   assert.equal(result.updates.at(-1).status, 'failed');
+});
+
+test('journaled resume reuses saved interpretation without another model call', async () => {
+  const result = await run(null, 2, false, { forbidInterpret:true, priorResult: {
+    journalVersion:1, materializationStarted:true, interpretation:{significance:0.7}, event:{id:9}
+  }});
+  assert.equal(result.writes,1);
+  assert.equal(result.updates.at(-1).status,'completed');
 });
