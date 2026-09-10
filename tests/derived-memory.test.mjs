@@ -9,6 +9,11 @@ test('relevant memory returns with traceable source', () => {
   const result = selectDerivedMemory([row], [event], access, 'квіти');
   assert.equal(result.length, 1); assert.deepEqual(result[0].sourceEventIds, [1]);
 });
+test('explicit shelf references retrieve otherwise unrelated records but never bypass source access', () => {
+  const refs=[{source_table:'memory_atoms',source_id:2}];
+  assert.equal(selectDerivedMemory([row],[event],access,'unrelated',null,6000,refs).length,1);
+  assert.equal(selectDerivedMemory([row],[{...event,chat_scope:'group'}],access,'unrelated',null,6000,refs).length,0);
+});
 test('all sources must belong to the same private conversation and sender', () => {
   for (const change of [{ profile: 'B' }, { chat_scope: 'group' }, { telegram_chat_id: '11' }, { sender_id: '21' }, { sender_id: null }, { source: 'api' }]) {
     assert.equal(selectDerivedMemory([row], [{ ...event, ...change }], access, 'квіти').length, 0);

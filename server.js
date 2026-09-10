@@ -4,7 +4,7 @@ import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 import { loadDerivedMemory } from "./lib/derived-memory.js";
 import { webhookSecret, verifyWebhook, secureExistingWebhook } from "./lib/telegram-auth.js";
-import { writeIntention } from "./lib/intentions.js";
+import { writeIntention, prioritizeReviews } from "./lib/intentions.js";
 import { requestManifest } from "./lib/request-manifest.js";
 import { validInterpretation } from "./lib/interpretation-schema.js";
 import { receiveUpdate, drainUpdates } from "./lib/telegram-inbox.js";
@@ -1906,9 +1906,11 @@ async function loadCognitiveContext(profile, allowPrivate = true) {
     });
   }
 
+  const due = await supabase.rpc('due_continuity_reviews', { p_profile: profile });
   const context = {
-    stateCards: cardsRes.data || [],
-    intentions: intentionsRes.data || [],
+    reviewStatus: due.error ? 'unavailable' : 'ok',
+    stateCards: prioritizeReviews(cardsRes.data, due.data, 'state_cards', COGNITIVE_OS_STATE_CARD_LIMIT),
+    intentions: prioritizeReviews(intentionsRes.data, due.data, 'intentions', COGNITIVE_OS_INTENTION_LIMIT),
     metaMemory: metaMemoryRes.data || [],
     stateVectors: stateVectorsRes.data || [],
     latestSnapshot: snapshotRes.data?.[0] || null
@@ -2075,7 +2077,7 @@ function formatCognitiveContext({ stateCards = [], intentions = [], metaMemory =
       "ACTIVE_STATE_CARDS:",
       ...stateCards.map(
         (card) =>
-          `- [${card.card_type}; weight ${formatScore(card.weight)}; confidence ${formatScore(card.confidence)}] ${card.title}: ${card.content}`
+          `- [id ${card.id}; review_due ${Boolean(card.review_due)}; ${card.card_type}; weight ${formatScore(card.weight)}; confidence ${formatScore(card.confidence)}] ${card.title}: ${card.content}`
       )
     );
   }
@@ -2086,7 +2088,7 @@ function formatCognitiveContext({ stateCards = [], intentions = [], metaMemory =
       "ACTIVE_INTENTIONS:",
       ...intentions.map(
         (intention) =>
-          `- [id ${intention.id}; ${intention.intention_type}; priority ${formatScore(intention.priority)}] ${intention.content}` +
+          `- [id ${intention.id}; review_due ${Boolean(intention.review_due)}; ${intention.intention_type}; priority ${formatScore(intention.priority)}] ${intention.content}` +
           (intention.reason ? ` Reason: ${intention.reason}` : "")
       )
     );
@@ -3488,6 +3490,7 @@ Self-analysis should be treated as gentle state noticing, not self-accusation. U
 Snapshot scores are absolute current estimates from 0.0 to 1.0. They are not deltas.
 If continuity increased by 0.10, put that in state_delta and still set continuity to the current absolute level, for example 0.85.
 For intention update or close, target_id MUST be the ID of an existing active intention in the provided context. Never invent an ID. If the target is unavailable, use action none; do not create a duplicate as a substitute for an update.
+Records marked review_due require reassessment against the completed exchange. If a state card is outdated, return its target_id with action close and its existing title/content. To revise or reaffirm it, use action update and a positive review_after_events interval. Never infer that a due review means the record is false. Unchanged intentions may be reaffirmed with update and a new review interval.
 Return JSON only.
 
 Schema:
@@ -3497,7 +3500,7 @@ Schema:
     {"type":"fact|relationship|style|preference|observation|boundary|question", "content":"...", "salience":0.0, "confidence":0.0}
   ],
   "state_updates": [
-    {"card_type":"identity|style|relationship|value|vulnerability|skill|pattern|support", "title":"...", "content":"...", "weight":0.0, "confidence":0.0, "stability":0.0, "valence":"warm|neutral|tense|uncertain", "review_after_events": null}
+    {"action":"create|update|close", "target_id":null, "card_type":"identity|style|relationship|value|vulnerability|skill|pattern|support", "title":"...", "content":"...", "weight":0.0, "confidence":0.0, "stability":0.0, "valence":"warm|neutral|tense|uncertain", "review_after_events": null}
   ],
   "causal_links": [
     {"from":"...", "to":"...", "relation":"...", "confidence":0.0}
@@ -4568,8 +4571,8 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
     const content = asSubjectText(card.content, event.profile, 1800);
     if (!title || !content) continue;
 
-    const inserted = await insertCognitiveRow(
-      "state_cards",
+    const inserted = await writeIntention(
+      supabase,
       {
         ...base,
         card_type: asText(card.card_type || "state", 80),
@@ -4579,14 +4582,19 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
         confidence: clamp01(card.confidence, 0.5),
         stability: clamp01(card.stability, 0.5),
         valence: card.valence ? asText(card.valence, 40) : null,
-        review_after_events: Number.isFinite(Number(card.review_after_events))
+        status: card.action === 'close' ? 'archived' : 'active',
+        review_after_events: card.review_after_events != null && Number.isInteger(Number(card.review_after_events)) && Number(card.review_after_events)>0
           ? Number(card.review_after_events)
           : null,
         metadata: card
       },
-      "STATE CARD"
+      card.target_id,
+      insertCognitiveRow,
+      'state_cards',
+      card.action || (card.target_id ? 'update' : 'create')
     );
-    if (inserted) stored.stateCards += 1;
+    if (inserted?.id) stored.stateCards += 1;
+    if (inserted?.skipped) stored.stateCardSkipped = inserted.reason;
   }
 
   for (const link of asArray(interpretation.causal_links).slice(0, 6)) {
@@ -4688,7 +4696,7 @@ async function storeCognitiveInterpretation({ event, job, interpretation }) {
         reason: asSubjectText(intention.reason, event.profile, 1200) || null,
         priority: clamp01(intention.priority, 0.5),
         status: intentionAction === "close" ? "closed" : "active",
-        review_after_events: Number.isFinite(Number(intention.review_after_events))
+        review_after_events: intention.review_after_events != null && Number.isInteger(Number(intention.review_after_events)) && Number(intention.review_after_events)>0
           ? Number(intention.review_after_events)
           : null,
         metadata: intention
@@ -4987,7 +4995,7 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     build: {
-      continuityRepairVersion: "2026-09-10-continuity-v5",
+      continuityRepairVersion: "2026-09-10-continuity-v6",
       telegramWebhookAuthentication: true,
       derivedMemoryMode: process.env.DERIVED_MEMORY_MODE || "live",
       telegramDeliveryLogs: true,
@@ -5201,9 +5209,11 @@ async function generateChatReply({
   debugInfo.fallbackCompactCount = fallbackContext.compactCount;
 
   const cognitiveContext = await loadCognitiveContext(modelConfig.profile, allowPrivate);
+  const subjectSpaceContext = await loadSubjectSpaceContext(modelConfig.profile, allowPrivate);
   const derivedMemory = await loadDerivedMemory(supabase, {
     profile: modelConfig.profile, source, chatScope, telegram,
     query: userMessage, trigger: activeTriggerName || triggerName,
+    references: subjectSpaceContext.objects || [],
     mode: COGNITIVE_OS_ENABLED && COGNITIVE_OS_CONTEXT_ENABLED
       ? process.env.DERIVED_MEMORY_MODE || "live" : "off"
   });
@@ -5227,7 +5237,6 @@ async function generateChatReply({
   debugInfo.coreActiveNodes = coreContext.activeNodes.length;
   debugInfo.coreAvailableNodes = coreContext.availableNodes.length;
   const corePromptForChat = buildCorePromptForChat(modelConfig, coreContext);
-  const subjectSpaceContext = await loadSubjectSpaceContext(modelConfig.profile, allowPrivate);
   debugInfo.subjectSpaceNodes = subjectSpaceContext.nodes.length;
   debugInfo.subjectSpaceEdges = subjectSpaceContext.edges.length;
   debugInfo.subjectSpaceObjects = subjectSpaceContext.objects.length;

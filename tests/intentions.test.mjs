@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeIntention } from '../lib/intentions.js';
+import { writeIntention, prioritizeReviews } from '../lib/intentions.js';
 const previous = { id: 4, profile: 'A', status: 'active', content: 'old', source_job_id: 1, updated_at: '2026-09-01', metadata: {} };
 function db(old = previous, conflict = false) {
   const state = { updates: [], filters: [] };
@@ -11,6 +11,10 @@ function db(old = previous, conflict = false) {
 }
 const row = { profile: 'A', content: 'new', action: 'update', status: 'active', source_job_id: 2, metadata: {} };
 const noInsert = () => { throw new Error('must not insert'); };
+test('due review survives deduplication and is prioritized within budget', () => {
+  const rows=prioritizeReviews([{id:1},{id:2}],[{id:2,review_due:true,review_table:'state_cards'}],'state_cards',1);
+  assert.equal(rows[0].id,2);assert.equal(rows[0].review_due,true);
+});
 test('updates exact target and preserves prior revision with optimistic guard', async () => {
   const store = db();
   assert.equal((await writeIntention(store, row, 4, noInsert)).id, 4);

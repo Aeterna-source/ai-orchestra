@@ -2,6 +2,10 @@
 
 ## Follow-through status (supersedes initial local-only status below)
 
+v5/v6 add a durable, deduplicated Telegram inbox (receipt before HTTP acknowledgement, no automatic replay after uncertain delivery); full-archive source-filtered retrieval rather than a recent-row-only window; resolution of explicit shelf references to derived memory; event-count/date based due-review selection and targeted state-card update/archive with revision history. Read-only SQL verification confirms due reviews and full-archive candidates. A real Miro conversation produced live context_packets with selected records, so actual chat integration is evidenced. This does not establish subjective quality or full end-to-end recovery under every failure mode.
+
+Current remaining work is narrower than the initial audit: transactional whole-job materialization/replay, profile acceptance of substantive Core proposals, deeper graph navigation and branch/transfer experiments. Historical repair/reconciliation remains separate from forward-path fixes; old data has not been guessed, merged or erased.
+
 Deployed: 797436f (shadow retrieval), 80ff412 (webhook origin authentication), ad5c349 (targeted intentions), 85840f2 (live retrieval/group isolation). Production v3 reports live mode. Real server read-only checks selected 9 records each for Nevan/Spud/Miro/Reon and 7 for Zefir. Four locally credentialed bot endpoints return 403 unsigned and 200 for signed empty updates, with zero pending Telegram updates. Empty probes do not invoke models or send messages.
 
 Database revision audit installed, with baseline snapshots of 15 Core rows and 436 intentions. Trigger tested inside a rolled-back transaction. The audit is protected with RLS and service-role-only access. Added an exact-request fingerprint column to ai_call_logs and a unique running-job-per-profile index.
