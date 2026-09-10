@@ -3,6 +3,7 @@ import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 import { loadDerivedMemory } from "./lib/derived-memory.js";
+import { webhookSecret, verifyWebhook, secureExistingWebhook } from "./lib/telegram-auth.js";
 
 dotenv.config();
 
@@ -4956,7 +4957,8 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     build: {
-      continuityRepairVersion: "2026-09-10-derived-memory-v1",
+      continuityRepairVersion: "2026-09-10-webhook-v2",
+      telegramWebhookAuthentication: true,
       derivedMemoryMode: process.env.DERIVED_MEMORY_MODE || "shadow",
       telegramDeliveryLogs: true,
       telegramApiRetries: true,
@@ -6310,6 +6312,10 @@ app.post("/telegram/:botKey", async (req, res) => {
     return res.status(404).json({ error: "Unknown Telegram bot" });
   }
 
+  if (!verifyWebhook(botConfig, req.headers['x-telegram-bot-api-secret-token'])) {
+    return res.status(403).json({ error: "Invalid webhook origin" });
+  }
+
   res.sendStatus(200);
 
   handleTelegramUpdate(botConfig, req.body).catch((err) => {
@@ -6352,6 +6358,7 @@ app.post("/api/telegram/set-webhooks", async (req, res) => {
   for (const bot of telegramBots) {
     const result = await telegramApi(bot, "setWebhook", {
       url: `${baseUrl}/telegram/${bot.key}`,
+      secret_token: webhookSecret(bot),
       allowed_updates: ["message", "edited_message"]
     });
     results.push({ key: bot.key, ok: Boolean(result) });
@@ -6371,4 +6378,10 @@ if (COGNITIVE_OS_ENABLED && COGNITIVE_OS_WORKER_ENABLED) {
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  // Preserve each registered URL and its pending updates. Telegram retries any
+  // deliveries rejected during the brief registration transition.
+  Promise.allSettled(telegramBots.map(bot => secureExistingWebhook(bot, telegramApi)))
+    .then(results => console.log('[TELEGRAM WEBHOOK AUTH]', results.map(result =>
+      result.status === 'fulfilled' ? result.value : { secured: false, reason: 'registration-failed' }
+    )));
 });
