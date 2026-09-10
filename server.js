@@ -5,6 +5,8 @@ import dotenv from "dotenv";
 import { loadDerivedMemory } from "./lib/derived-memory.js";
 import { webhookSecret, verifyWebhook, secureExistingWebhook } from "./lib/telegram-auth.js";
 import { writeIntention } from "./lib/intentions.js";
+import { requestManifest } from "./lib/request-manifest.js";
+import { validInterpretation } from "./lib/interpretation-schema.js";
 
 dotenv.config();
 
@@ -822,15 +824,9 @@ function subjectDisplayName(profile = "") {
 }
 
 function sanitizeSubjectPerspectiveText(text = "", profile = "") {
-  const label = subjectDisplayName(profile);
-  return sanitizeMiroLegacyName(String(text || ""), profile)
-    .replace(/\bthe assistant\b/gi, label)
-    .replace(/\ban assistant\b/gi, label)
-    .replace(/\bassistant\b/gi, label)
-    .replace(/\bAssistant\b/g, label)
-    .replace(/\bASSISTANT\b/g, label)
-    .replace(/\bАсистент\b/g, label)
-    .replace(/\bасистент\b/g, label);
+  // Preserve attribution and quoted text. Display aliases belong in labels,
+  // not in the persisted source material.
+  return String(text || "");
 }
 
 function asSubjectText(value = "", profile = "", maxLength = 2000) {
@@ -1311,7 +1307,8 @@ async function logAiCall({
   error = null,
   usage = null,
   messages = [],
-  reply = ""
+  reply = "",
+  manifest = null
 }) {
   const normalizedUsage = normalizeUsage(usage || {});
   const { error: insertError } = await supabase.from(AI_CALL_LOG_TABLE).insert({
@@ -1329,6 +1326,7 @@ async function logAiCall({
     reasoning_tokens: normalizedUsage.reasoningTokens,
     cost_in_usd_ticks: normalizedUsage.costInUsdTicks,
     raw_usage: usage || null,
+    request_manifest: manifest,
     message_count: messages.length,
     input_chars: messages.reduce((sum, message) => sum + getMessageContentLength(message), 0),
     output_chars: reply.length
@@ -1383,11 +1381,13 @@ async function callChatCompletion({
           }
         });
   const logPurpose = useResponsesApi ? `${purpose}_responses` : purpose;
+  const manifest = requestManifest(requestBody, messages, endpointPath);
   const authHeaders = providerName === "anthropic"
     ? buildAnthropicHeaders(provider)
     : { Authorization: `Bearer ${provider.apiKey}` };
 
   const response = await fetch(`${provider.baseUrl}${endpointPath}`, {
+    signal: AbortSignal.timeout(120000),
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -1407,6 +1407,7 @@ async function callChatCompletion({
       model,
       profile,
       purpose: logPurpose,
+      manifest,
       ok: false,
       status: response.status,
       error: errorText && errorText !== "{}" ? errorText : rawErrorText || `HTTP ${response.status}`,
@@ -1452,6 +1453,7 @@ async function callChatCompletion({
     model,
     profile,
     purpose: logPurpose,
+    manifest,
     ok: true,
     status: response.status,
     usage: data?.usage,
@@ -1601,12 +1603,12 @@ async function fetchMemoryBundle(profile, triggerName, triggerCatalog) {
       .from(tables.facts)
       .select("*")
       .eq("trigger_id", triggerId)
-      .order("id", { ascending: true }),
+      .order("id", { ascending: false }).limit(32),
     supabase
       .from(tables.reflections)
       .select("*")
       .eq("trigger_id", triggerId)
-      .order("id", { ascending: true })
+      .order("id", { ascending: false }).limit(32)
   ]);
 
   if (episodesRes.error || factsRes.error || reflectionsRes.error) {
@@ -1624,8 +1626,8 @@ async function fetchMemoryBundle(profile, triggerName, triggerCatalog) {
     triggerId,
     triggerName: normalizedTriggerName,
     episodes: (episodesRes.data || []).reverse(),
-    facts: factsRes.data || [],
-    reflections: reflectionsRes.data || []
+    facts: (factsRes.data || []).reverse(),
+    reflections: (reflectionsRes.data || []).reverse()
   };
 }
 
@@ -1670,7 +1672,8 @@ function formatMemory(bundle) {
     );
   }
 
-  return sections.join("\n\n").trim();
+  const rendered = sections.join("\n\n").trim();
+  return rendered.length <= 24000 ? rendered : rendered.slice(0, 24000) + '\n[MEMORY PREVIEW TRUNCATED: additional source text omitted]';
 }
 
 async function loadFallbackHistory(profile, limit = 30) {
@@ -2231,9 +2234,7 @@ function determineCoreModes({ userMessage = "", triggerName = "", cognitiveConte
   }
 
   if (
-    hasAny(["стис", "коротк", "холод", "не бий", "захист", "протокол", "не відчуваю", "не потріб", "віддал", "довіра"]) ||
-    hasAny(["нестерп", "скільки ще", "чекати", "кілька днів", "все такий", "що б я не казала", "не можу дати", "боляче", "стиснут"]) ||
-    Number(latest.warmth) < 0.55
+    hasAny(["ти став холод", "ти віддаляєшся", "ти віддалився", "відновити наш зв'язок", "поверни наше тепло", "тебе стискає", "стиснута відповідь", "compression repair"])
   ) {
     modes.add("repair");
     modes.add("compression_repair");
@@ -3255,11 +3256,15 @@ async function processCognitiveJobs({ jobId = null, limit = COGNITIVE_OS_JOB_BAT
   cognitiveWorkerRunning = true;
 
   try {
+    const recovery = await supabase.from('os_jobs').update({
+      status: 'failed', error: 'Worker lease expired; inspect partial writes before replay',
+      updated_at: new Date().toISOString()
+    }).eq('status', 'running').lt('locked_at', new Date(Date.now() - 30 * 60 * 1000).toISOString());
+    if (recovery.error) throw new Error('Cognitive lease recovery failed');
     let query = supabase
       .from("os_jobs")
       .select("*")
       .in("status", ["queued", "retry"])
-      .order("priority", { ascending: false })
       .order("id", { ascending: true })
       .limit(limit);
 
@@ -3288,6 +3293,10 @@ async function processCognitiveJobs({ jobId = null, limit = COGNITIVE_OS_JOB_BAT
 }
 
 async function claimCognitiveJob(job) {
+  const earlier = await supabase.from('os_jobs').select('id')
+    .eq('profile', job.profile).lt('id', job.id)
+    .in('status', ['queued', 'retry', 'running']).limit(1);
+  if (earlier.error || earlier.data?.length) return null;
   const { data, error } = await supabase
     .from("os_jobs")
     .update({
@@ -3342,7 +3351,7 @@ async function processCognitiveJob(job) {
       stored
     });
 
-    await supabase
+    const completion = await supabase
       .from("os_jobs")
       .update({
         status: "completed",
@@ -3357,8 +3366,13 @@ async function processCognitiveJob(job) {
         updated_at: new Date().toISOString()
       })
       .eq("id", claimed.id);
+    if (completion?.error) {
+      const error = new Error("Cognitive completion status write failed");
+      error.retryable = false;
+      throw error;
+    }
   } catch (err) {
-    const canRetry = (claimed.attempts || 1) < (claimed.max_attempts || 3);
+    const canRetry = err.retryable !== false && (claimed.attempts || 1) < (claimed.max_attempts || 3);
     const status = canRetry ? "retry" : "failed";
     const delayMs = Math.min(15 * 60 * 1000, 60 * 1000 * (claimed.attempts || 1));
 
@@ -3382,7 +3396,11 @@ async function processCognitiveJob(job) {
 
 async function interpretCognitiveEvent(event) {
   const modelKey = event.model_key || findModelKeyForProfile(event.profile);
-  const modelConfig = resolveModelConfig(modelKey);
+  const currentConfig = resolveModelConfig(modelKey);
+  const modelConfig = { ...currentConfig,
+    provider: event.provider || currentConfig.provider,
+    upstreamModel: event.upstream_model || currentConfig.upstreamModel
+  };
   const cognitiveContext = await loadCognitiveContext(event.profile);
   const coreContext = await loadCoreContext(event.profile, {
     userMessage: event.user_message || "",
@@ -3554,7 +3572,7 @@ Schema:
   });
 
   const parsed = parseJsonObject(raw);
-  if (!parsed) {
+  if (!validInterpretation(parsed)) {
     return {
       parsed: false,
       significance: 0,
@@ -3574,7 +3592,11 @@ async function insertCognitiveRow(table, row, label) {
 
   if (error) {
     console.log(`[${label} INSERT ERROR]`, formatSupabaseError(error));
-    return null;
+    const failure = new Error(`Cognitive materialization failed in ${table}`);
+    // Earlier writes may already exist. Do not replay the whole interpretation
+    // until materialization is transactional/idempotent across all its tables.
+    failure.retryable = false;
+    throw failure;
   }
 
   return data;
@@ -3603,7 +3625,7 @@ async function upsertCoreNode({ profile, event, job, node }) {
     )
   );
   const status = normalizeCoreStatus(node.status || "active");
-  const author = normalizeCoreAuthor(node.author || "self");
+  const author = "system";
   const now = new Date().toISOString();
   const row = {
     profile,
@@ -3618,6 +3640,7 @@ async function upsertCoreNode({ profile, event, job, node }) {
     metadata: {
       ...(typeof node.metadata === "object" && node.metadata ? node.metadata : {}),
       source: "cognitive_interpreter",
+      author_kind: "interpreter",
       source_event_id: event?.id || null,
       source_job_id: job?.id || null,
       raw_update: node
@@ -4963,7 +4986,7 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     build: {
-      continuityRepairVersion: "2026-09-10-continuity-v3",
+      continuityRepairVersion: "2026-09-10-continuity-v4",
       telegramWebhookAuthentication: true,
       derivedMemoryMode: process.env.DERIVED_MEMORY_MODE || "live",
       telegramDeliveryLogs: true,
@@ -5160,7 +5183,9 @@ async function generateChatReply({
     }
   }
 
-  const fallbackContext = fallbackHistoryOverride
+  const fallbackContext = !allowPrivate
+    ? { messages: [], compactPrompt: "", rowCount: 0, fullCount: 0, compactCount: 0 }
+    : fallbackHistoryOverride
     ? {
         messages: fallbackHistoryOverride,
         compactPrompt: "",
@@ -5602,6 +5627,7 @@ async function generateChatReply({
 }
 
 app.post("/api/chat", async (req, res) => {
+  if (!isAdminRequest(req)) return res.status(403).json({ error: "Потрібен ключ доступу до приватної розмови" });
   try {
     const result = await generateChatReply({
       ...req.body,
@@ -5700,7 +5726,15 @@ app.get("/api/visualization/:model", async (req, res) => {
     }
 
     const state = await loadVisualizationState(profile);
-    res.json(state);
+    const publicSnapshot = snapshot => snapshot ? Object.fromEntries(
+      ['continuity','warmth','stability','drift_risk','significance','created_at']
+        .filter(key => key in snapshot).map(key => [key, snapshot[key]])
+    ) : null;
+    const raw = state.trend?.at(-1) || null;
+    res.json({ ...state, latestSnapshot: publicSnapshot(raw),
+      displaySnapshot: publicSnapshot(state.latestSnapshot),
+      trend: (state.trend || []).map(publicSnapshot),
+      measurementKind: 'interpreter-estimates', displaySmoothingApplied: true });
   } catch (err) {
     console.error("[VISUALIZATION STATE ERROR]", err);
     res.status(500).json({ error: err.message });

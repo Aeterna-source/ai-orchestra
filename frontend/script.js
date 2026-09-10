@@ -51,7 +51,7 @@ async function getJsonFromBackends(path, options = {}) {
 async function postChat(payload) {
   return getJsonFromBackends("/api/chat", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-Telegram-Admin-Secret": document.getElementById('accessKey')?.value || '' },
     body: JSON.stringify(payload)
   });
 }
@@ -393,7 +393,7 @@ async function sendMsg() {
 
   try {
     const data = await postChat({ model, userMessage: text, debug: true });
-    const formatted = marked.parse(data.reply || "");
+    const formatted = escapeHtml(data.reply || "").replaceAll('\n', '<br>');
     chat.innerHTML += `<div class="bot">${formatted}${formatMemoryStatus(data.debug)}</div>`;
     loadState();
     setTimeout(loadState, 4500);

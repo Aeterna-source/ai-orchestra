@@ -2,6 +2,11 @@ import { webhookSecret } from '../lib/telegram-auth.js';
 const base = 'https://ai-orchestra-production.up.railway.app';
 const health = await (await fetch(`${base}/api/health`)).json();
 console.log(JSON.stringify({ version: health.build?.continuityRepairVersion, mode: health.build?.derivedMemoryMode }));
+const chatDenied = await fetch(`${base}/api/chat`, {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+console.log(JSON.stringify({unauthenticatedChatStatus:chatDenied.status}));
+if (chatDenied.status !== 403) process.exitCode = 1;
+const visual = await (await fetch(`${base}/api/visualization/nevan`)).json();
+if (JSON.stringify(visual).includes('"notes"')) { console.log('Visualization exposes notes'); process.exitCode = 1; }
 if (process.env.TELEGRAM_ADMIN_SECRET) {
   for (const profile of ['Nevan','Spud','Miro','Reon','Zefir']) {
     const response = await fetch(`${base}/api/cognitive/retrieval-check`, { method: 'POST', headers: {

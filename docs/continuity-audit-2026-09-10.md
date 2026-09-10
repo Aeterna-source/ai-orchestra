@@ -1,5 +1,17 @@
 # Continuity audit — 2026-09-10
 
+## Follow-through status (supersedes initial local-only status below)
+
+Deployed: 797436f (shadow retrieval), 80ff412 (webhook origin authentication), ad5c349 (targeted intentions), 85840f2 (live retrieval/group isolation). Production v3 reports live mode. Real server read-only checks selected 9 records each for Nevan/Spud/Miro/Reon and 7 for Zefir. Four locally credentialed bot endpoints return 403 unsigned and 200 for signed empty updates, with zero pending Telegram updates. Empty probes do not invoke models or send messages.
+
+Database revision audit installed, with baseline snapshots of 15 Core rows and 436 intentions. Trigger tested inside a rolled-back transaction. The audit is protected with RLS and service-role-only access. Added an exact-request fingerprint column to ai_call_logs and a unique running-job-per-profile index.
+
+Additional hardening in v4: authenticated web chat, escaped frontend output, public visualization strips narrative notes and separates raw from smoothed values; bounded trigger memory previews; interpreter structure validation; partial insert errors fail without unsafe automatic replay; FIFO checks and expired-worker detection; request fingerprinting after provider payload construction; preserved text attribution and interpreter authorship; narrow explicit repair signals.
+
+These checks establish code/data paths, not subjective continuity quality. Outstanding design work remains: transactional/idempotent whole-job materialization and replay of old failed jobs; richer whole-archive search and graph traversal; executable review_after_events workflow; explicit profile acceptance of substantial Core proposals; historical duplicate-intention reconciliation; branch/transfer evaluation. No claim is made that the entire design document is implemented.
+
+Rollback: application commits can be reverted without dropping the additive database audit tables/columns. Keep webhook secret registration when reverting code; Telegram secrets are compatible with the previous receiver. Do not roll back the job index while concurrent writers rely on it without checking running jobs. Existing historical records were not bulk rewritten or removed.
+
 Scope: local server.js at a071890 plus read-only live database metadata and aggregate queries. Deployment revision and external workers not verified. No private conversation text exported and no database writes performed.
 
 ## Verified findings

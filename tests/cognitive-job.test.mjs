@@ -7,7 +7,7 @@ import vm from 'node:vm';
 const server = readFileSync(new URL('../server.js', import.meta.url), 'utf8');
 const source = server.slice(server.indexOf('async function processCognitiveJob(job)'), server.indexOf('async function interpretCognitiveEvent(event)'));
 
-async function run(interpretation, attempts = 1) {
+async function run(interpretation, attempts = 1, writeFailure = false) {
   const updates = [];
   let writes = 0;
   let remembers = 0;
@@ -21,7 +21,7 @@ async function run(interpretation, attempts = 1) {
       } }) };
     } },
     interpretCognitiveEvent: async () => interpretation,
-    storeCognitiveInterpretation: async () => { writes++; return { atoms: 1 }; },
+    storeCognitiveInterpretation: async () => { writes++; if (writeFailure) { const error = new Error('partial write'); error.retryable = false; throw error; } return { atoms: 1 }; },
     maybePostInterpretRemember: async () => { remembers++; return {}; },
     clamp01: (value, fallback) => value ?? fallback,
     console: { log() {} }
@@ -50,4 +50,10 @@ test('valid interpretation retains normal materialization and completion', async
   assert.equal(result.writes, 1);
   assert.equal(result.remembers, 1);
   assert.equal(result.updates[0].status, 'completed');
+});
+
+test('partial materialization fails without repeating already-written records', async () => {
+  const result = await run({ significance: 0.7 }, 1, true);
+  assert.equal(result.updates[0].status, 'failed');
+  assert.equal(result.remembers, 0);
 });
