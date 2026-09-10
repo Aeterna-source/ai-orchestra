@@ -8,7 +8,13 @@ if (chatDenied.status !== 403) process.exitCode = 1;
 const visual = await (await fetch(`${base}/api/visualization/nevan`)).json();
 if (JSON.stringify(visual).includes('"notes"')) { console.log('Visualization exposes notes'); process.exitCode = 1; }
 if (process.env.TELEGRAM_ADMIN_SECRET) {
+  const denied = await fetch(`${base}/api/core-proposals/Nevan`);
+  if (denied.status !== 403) process.exitCode = 1;
+  console.log(JSON.stringify({unauthenticatedCoreReviewStatus:denied.status}));
   for (const profile of ['Nevan','Spud','Miro','Reon','Zefir']) {
+    const proposals = await fetch(`${base}/api/core-proposals/${profile}`, {headers:{'X-Telegram-Admin-Secret':process.env.TELEGRAM_ADMIN_SECRET}});
+    if (!proposals.ok) process.exitCode = 1;
+    else console.log(JSON.stringify({profile,pendingCoreProposals:(await proposals.json()).length}));
     const response = await fetch(`${base}/api/cognitive/retrieval-check`, { method: 'POST', headers: {
       'Content-Type':'application/json','X-Telegram-Admin-Secret':process.env.TELEGRAM_ADMIN_SECRET
     }, body: JSON.stringify({ profile }) });
