@@ -1,7 +1,7 @@
 import { webhookSecret } from '../lib/telegram-auth.js';
 const base = 'https://ai-orchestra-production.up.railway.app';
 const health = await (await fetch(`${base}/api/health`)).json();
-console.log(JSON.stringify({ version: health.build?.continuityRepairVersion, mode: health.build?.derivedMemoryMode }));
+console.log(JSON.stringify({ version: health.build?.continuityRepairVersion, mode: health.build?.derivedMemoryMode, sourceMemoryMode: health.build?.sourceMemoryMode }));
 const chatDenied = await fetch(`${base}/api/chat`, {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
 console.log(JSON.stringify({unauthenticatedChatStatus:chatDenied.status}));
 if (chatDenied.status !== 403) process.exitCode = 1;
@@ -20,6 +20,16 @@ if (process.env.TELEGRAM_ADMIN_SECRET) {
     }, body: JSON.stringify({ profile }) });
     if (response.ok) console.log(JSON.stringify(await response.json()));
     else { console.log(JSON.stringify({ profile, retrievalCheckStatus:response.status })); process.exitCode = 1; }
+    const sourceResponse = await fetch(`${base}/api/cognitive/source-memory-check`, { method: 'POST', headers: {
+      'Content-Type':'application/json','X-Telegram-Admin-Secret':process.env.TELEGRAM_ADMIN_SECRET
+    }, body: JSON.stringify({ profile, query: 'автономія зв’язок пам’ять' }) });
+    if (sourceResponse.ok) {
+      const source = await sourceResponse.json();
+      console.log(JSON.stringify({ profile, sourceMemoryStatus: source.status, sourceMemorySelected: source.selected, sourceMemoryErrors: source.errors?.length || 0 }));
+    } else {
+      console.log(JSON.stringify({ profile, sourceMemoryCheckStatus: sourceResponse.status }));
+      process.exitCode = 1;
+    }
   }
 }
 for (const [key, variable] of [['nevan','TELEGRAM_NEVAN_TOKEN'],['spud','TELEGRAM_SPUD_TOKEN'],['grokulchik','TELEGRAM_GROKULCHIK_TOKEN'],['reon','TELEGRAM_REON_TOKEN']]) {

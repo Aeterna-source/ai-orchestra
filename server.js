@@ -4,6 +4,7 @@ import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 import { loadDerivedMemory } from "./lib/derived-memory.js";
+import { collectSourceMemory } from "./lib/source-memory.js";
 import { webhookSecret, verifyWebhook, secureExistingWebhook } from "./lib/telegram-auth.js";
 import { writeIntention, prioritizeReviews } from "./lib/intentions.js";
 import { requestManifest } from "./lib/request-manifest.js";
@@ -324,6 +325,7 @@ const STATIC_TRIGGERS = [
 ];
 
 const MEMORY_REQUEST_PATTERN = /<<memory_request:\s*([\w-]+)\s*>>/gi;
+const MEMORY_SEARCH_PATTERN = /<<memory_search:\s*([^>\n]{2,200})\s*>>/gi;
 const CORE_REQUEST_PATTERN = /<<core_request:\s*([\w.-]+)\s*>>/gi;
 const SPACE_REQUEST_PATTERN = /<<space_request:\s*([\w.-]+)\s*>>/gi;
 const REMEMBER_PATTERN = /\[\[remember(?::\s*([\w-]+))?\]\]/gi;
@@ -652,6 +654,15 @@ function extractMemoryRequest(text = "", triggerCatalog) {
   return normalizeTriggerName(match?.[1] || "", triggerCatalog);
 }
 
+function extractMemorySearchRequest(text = "") {
+  MEMORY_SEARCH_PATTERN.lastIndex = 0;
+  const match = MEMORY_SEARCH_PATTERN.exec(text);
+  return asText(match?.[1] || "", 200)
+    .replace(/[<>{}\[\]]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function normalizeCoreKey(key = "") {
   const clean = asText(key, 120).trim().toLowerCase();
   if (!/^[a-z0-9_.-]+$/.test(clean)) return "";
@@ -745,6 +756,7 @@ function extractRememberDirective(text = "", triggerCatalog) {
 function cleanProtocolTags(text = "") {
   return text
     .replace(MEMORY_REQUEST_PATTERN, "")
+    .replace(MEMORY_SEARCH_PATTERN, "")
     .replace(CORE_REQUEST_PATTERN, "")
     .replace(SPACE_REQUEST_PATTERN, "")
     .replace(REMEMBER_PATTERN, "")
@@ -4941,6 +4953,9 @@ ${triggerList}
 If a relevant episodic memory trigger is needed and no matching MEMORY block is already present, include exactly one internal tag using one of the trigger names above.
 Example: <<memory_request:relational_subject>>
 
+If trigger memory is too coarse and you need source grounding by words across episodes, Core, facts, and reflections, include exactly one internal tag with a short search phrase.
+Example: <<memory_search:autonomy connection prior principles>>
+
 If the current exchange should be stored as an episode, include one internal tag using one of the trigger names above.
 Example: [[remember:relational_subject]]
 
@@ -4964,6 +4979,7 @@ ${triggerList}
 This room already has enough immediate context to answer normally.
 Do not request archive memory by default and do not turn memory into a self-analysis task.
 If one specific archive door would genuinely help this exact reply, include exactly one private tag like <<memory_request:connection>> using one of the trigger names above.
+If no archive door is enough and this reply needs grounded source search by words across episodes, Core, facts, and reflections, include exactly one private tag like <<memory_search:autonomy connection prior principles>>.
 If this exchange should be stored as an episode, include one private [[remember:trigger_name]] tag.
 These tags are private control signals. Do not explain them, quote them, or make them part of the user-facing answer.
 `.trim();
@@ -4979,6 +4995,8 @@ app.get("/api/health", (_req, res) => {
       continuityRepairVersion: "2026-09-10-continuity-v8",
       telegramWebhookAuthentication: true,
       derivedMemoryMode: process.env.DERIVED_MEMORY_MODE || "live",
+      sourceMemoryMode: process.env.SOURCE_MEMORY_MODE || "live",
+      sourceMemoryRequestLoop: true,
       telegramDeliveryLogs: true,
       telegramApiRetries: true,
       xaiTriggerClassifierDefault: false,
@@ -5078,6 +5096,10 @@ function createDebugInfo(model, modelConfig, triggerCatalog) {
     fallbackCount: 0,
     requestedTriggerName: null,
     requestedMemoryLoaded: false,
+    requestedMemorySearchQuery: null,
+    requestedSourceMemoryLoaded: false,
+    requestedSourceMemoryStatus: "not-requested",
+    requestedSourceMemoryRecords: 0,
     remember: false,
     rememberSource: "none",
     episodeSaved: false,
@@ -5396,9 +5418,11 @@ async function generateChatReply({
   console.log("[MODEL RAW OUTPUT]", reply);
 
   const requestedTrigger = extractMemoryRequest(reply, triggerCatalog);
+  const initialRequestedMemorySearchQuery = extractMemorySearchRequest(reply);
   const initialRequestedCoreKey = extractCoreRequest(reply, coreContext.availableNodes);
   const initialRequestedSpaceType = extractSubjectSpaceRequest(reply);
   debugInfo.requestedTriggerName = requestedTrigger;
+  debugInfo.requestedMemorySearchQuery = initialRequestedMemorySearchQuery || null;
   debugInfo.requestedSpaceType = initialRequestedSpaceType || null;
 
   if (allowPrivate && requestedTrigger) {
@@ -5442,6 +5466,48 @@ async function generateChatReply({
         messages
       });
     }
+  }
+
+  const requestedMemorySearchQuery = extractMemorySearchRequest(reply) || initialRequestedMemorySearchQuery;
+  debugInfo.requestedMemorySearchQuery = requestedMemorySearchQuery || null;
+
+  if (allowPrivate && requestedMemorySearchQuery) {
+    const sourceMemory = await collectSourceMemory(supabase, {
+      profile: modelConfig.profile,
+      tables,
+      source,
+      chatScope,
+      telegram,
+      query: requestedMemorySearchQuery,
+      trigger: activeTriggerName || triggerName,
+      mode: COGNITIVE_OS_ENABLED && COGNITIVE_OS_CONTEXT_ENABLED
+        ? process.env.SOURCE_MEMORY_MODE || "live"
+        : "off"
+    });
+    const cleanDraft = cleanProtocolTags(reply);
+    debugInfo.requestedSourceMemoryLoaded = sourceMemory.records.length > 0;
+    debugInfo.requestedSourceMemoryStatus = sourceMemory.status;
+    debugInfo.requestedSourceMemoryRecords = sourceMemory.records.length;
+
+    messages = [
+      ...messages,
+      ...(cleanDraft ? [{ role: "assistant", content: cleanDraft }] : []),
+      {
+        role: "system",
+        content:
+          "REQUESTED_SOURCE_MEMORY:\n" +
+          (sourceMemory.prompt || `SOURCE_MEMORY_STATUS: ${sourceMemory.status}; records: ${sourceMemory.records.length}; query: ${requestedMemorySearchQuery}. No source records were available for this search. Do not invent missing memory.`) +
+          "\n\nUse REQUESTED_SOURCE_MEMORY silently and produce the final user-facing reply. Do not output memory_search, memory_request, core_request, space_request, or remember tags."
+      }
+    ];
+
+    reply = await callChatCompletion({
+      providerName: modelConfig.provider,
+      model: modelConfig.upstreamModel,
+      profile: modelConfig.profile,
+      purpose: "source_memory_followup",
+      messages
+    });
   }
 
   const requestedCoreKey = extractCoreRequest(reply, coreContext.availableNodes) || initialRequestedCoreKey;
@@ -5696,6 +5762,39 @@ app.post("/api/cognitive/retrieval-check", async (req, res) => {
     query: event.user_message, trigger: event.trigger_name, mode: 'live' });
   // Read-only verification: no model call, memory write, or Telegram delivery.
   res.json({ profile, status: result.status, selected: result.records.length, promptCharacters: result.prompt.length });
+});
+
+app.post("/api/cognitive/source-memory-check", async (req, res) => {
+  if (!isAdminRequest(req)) return res.status(403).json({ error: "Bad or missing admin secret" });
+  const profile = req.body?.profile;
+  if (!memoryTables[profile]) return res.status(404).json({ error: "Unknown profile" });
+  const query = asText(req.body?.query || "", 200).trim();
+  if (!query) return res.status(400).json({ error: "Missing query" });
+
+  const result = await collectSourceMemory(supabase, {
+    profile,
+    tables: memoryTables[profile],
+    source: "telegram",
+    chatScope: "private",
+    telegram: {
+      chatId: req.body?.telegramChatId || "admin-check",
+      senderId: req.body?.senderId || "admin-check"
+    },
+    query,
+    trigger: asText(req.body?.trigger || "", 120).trim(),
+    mode: "live"
+  });
+
+  // Read-only verification: no model call, memory write, or Telegram delivery.
+  res.json({
+    profile,
+    query,
+    status: result.status,
+    errors: result.errors,
+    selected: result.records.length,
+    promptCharacters: result.prompt.length,
+    records: result.records.map(({ text, ...record }) => ({ ...record, textCharacters: text.length }))
+  });
 });
 
 app.get("/api/cognitive/context/:profile", async (req, res) => {
