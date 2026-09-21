@@ -3298,8 +3298,7 @@ async function processCognitiveJobs({ jobId = null, limit = COGNITIVE_OS_JOB_BAT
 
     let processed = 0;
     for (const job of data || []) {
-      await processCognitiveJob(job);
-      processed += 1;
+      if (await processCognitiveJob(job)) processed += 1;
     }
 
     return { processed };
@@ -3315,7 +3314,7 @@ async function claimCognitiveJob(job) {
 }
 async function processCognitiveJob(job) {
   const claimed = await claimCognitiveJob(job);
-  if (!claimed) return;
+  if (!claimed) return false;
   let materializationStarted = Boolean(claimed.result?.materializationStarted);
 
   try {
@@ -3389,6 +3388,7 @@ async function processCognitiveJob(job) {
       error.durableFailure = true;
       throw error;
     }
+    return true;
   } catch (err) {
     const canRetry = (!materializationStarted || err.durableFailure === true) && err.retryable !== false && (claimed.attempts || 1) < (claimed.max_attempts || 3);
     const status = canRetry ? "retry" : "failed";
@@ -3409,7 +3409,50 @@ async function processCognitiveJob(job) {
       status,
       error: err.message
     });
+    return true;
   }
+}
+
+async function recoverStaleCognitiveJobs({ profile = "", jobId = null, minAgeSeconds = 1800, limit = 10 } = {}) {
+  const cutoff = new Date(Date.now() - minAgeSeconds * 1000).toISOString();
+  let query = supabase
+    .from("os_jobs")
+    .select("id,profile,status,attempts,max_attempts,locked_at,result")
+    .eq("status", "running")
+    .lt("locked_at", cutoff)
+    .order("id", { ascending: true })
+    .limit(limit);
+  if (profile) query = query.eq("profile", profile);
+  if (jobId) query = query.eq("id", jobId);
+
+  const rows = await query;
+  if (rows.error) throw new Error(`Cognitive stale job scan failed: ${formatSupabaseError(rows.error)}`);
+
+  const recovered = [];
+  for (const job of rows.data || []) {
+    const resumable = job.result?.journalVersion === 1 && (job.attempts || 0) < (job.max_attempts || 3);
+    const status = resumable ? "retry" : "failed";
+    const error = resumable
+      ? "Worker interrupted; admin stale lease recovery will resume from persisted steps"
+      : "Worker interrupted; admin stale lease recovery could not safely resume";
+    const update = await supabase
+      .from("os_jobs")
+      .update({
+        status,
+        error,
+        run_after: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", job.id)
+      .eq("status", "running")
+      .eq("locked_at", job.locked_at)
+      .select("id,profile,status,attempts,max_attempts,run_after,locked_at")
+      .maybeSingle();
+    if (update.error) throw new Error(`Cognitive stale job recovery failed: ${formatSupabaseError(update.error)}`);
+    if (update.data) recovered.push(update.data);
+  }
+
+  return { cutoff, recovered };
 }
 
 async function interpretCognitiveEvent(event) {
@@ -5746,6 +5789,20 @@ app.post("/api/cognitive/jobs/run", async (req, res) => {
   const limit = Math.max(1, Math.min(20, Number(req.body?.limit || COGNITIVE_OS_JOB_BATCH_LIMIT)));
   const result = await processCognitiveJobs({ limit });
   res.json(result);
+});
+
+app.post("/api/cognitive/jobs/recover-stale", async (req, res) => {
+  if (!isAdminRequest(req)) return res.status(403).json({ error: "Bad or missing admin secret" });
+  const profile = req.body?.profile ? resolveProfileKey(req.body.profile) : "";
+  if (req.body?.profile && !profile) return res.status(404).json({ error: "Unknown profile" });
+  const jobId = req.body?.jobId ? Number(req.body.jobId) : null;
+  if (jobId !== null && (!Number.isInteger(jobId) || jobId <= 0)) {
+    return res.status(400).json({ error: "Invalid jobId" });
+  }
+  const minAgeSeconds = Math.max(60, Math.min(86400, Number(req.body?.minAgeSeconds || 1800)));
+  const limit = Math.max(1, Math.min(25, Number(req.body?.limit || 10)));
+  const result = await recoverStaleCognitiveJobs({ profile, jobId, minAgeSeconds, limit });
+  res.json({ ok: true, ...result });
 });
 
 app.post("/api/cognitive/jobs/backfill", async (req, res) => {
