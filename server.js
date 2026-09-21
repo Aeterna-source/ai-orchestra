@@ -5829,8 +5829,8 @@ async function countRows(table, configure = (query) => query) {
   return { count: result.count || 0 };
 }
 
-async function latestRows(table, { profile = "", select = "id,profile,status,created_at,updated_at", order = "id", limit = 5 } = {}) {
-  let query = supabase.from(table).select(select).order(order, { ascending: false }).limit(limit);
+async function latestRows(table, { profile = "", select = "id,profile,status,created_at,updated_at", order = "id", ascending = false, limit = 5 } = {}) {
+  let query = supabase.from(table).select(select).order(order, { ascending }).limit(limit);
   if (profile) query = query.eq("profile", profile);
   const result = await query;
   if (result.error) return { error: formatSupabaseError(result.error), rows: [] };
@@ -5892,6 +5892,13 @@ app.post("/api/cognitive/status", async (req, res) => {
       rememberOnly: COGNITIVE_OS_INTERPRET_REMEMBER_ONLY
     },
     jobsByStatus,
+    oldestJobs: await latestRows("os_jobs", {
+      profile,
+      select: "id,profile,status,attempts,max_attempts,run_after,locked_at,error,created_at,updated_at,completed_at",
+      order: "id",
+      ascending: true,
+      limit: 8
+    }),
     tableFreshness
   });
 });
