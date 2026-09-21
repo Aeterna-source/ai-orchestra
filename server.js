@@ -3213,7 +3213,7 @@ async function recordCognitiveEvent({
         requestedCoreLoaded: debugInfo.requestedCoreLoaded
       }
     })
-    .select("id")
+    .select("id,chat_scope")
     .single();
 
   if (error) {
@@ -5746,6 +5746,81 @@ app.post("/api/cognitive/jobs/run", async (req, res) => {
   const limit = Math.max(1, Math.min(20, Number(req.body?.limit || COGNITIVE_OS_JOB_BATCH_LIMIT)));
   const result = await processCognitiveJobs({ limit });
   res.json(result);
+});
+
+app.post("/api/cognitive/jobs/backfill", async (req, res) => {
+  if (!isAdminRequest(req)) return res.status(403).json({ error: "Bad or missing admin secret" });
+  const profile = req.body?.profile ? resolveProfileKey(req.body.profile) : "";
+  if (req.body?.profile && !profile) return res.status(404).json({ error: "Unknown profile" });
+  const limit = Math.max(1, Math.min(250, Number(req.body?.limit || 100)));
+  const since = asText(req.body?.since || "2026-09-10T10:12:22.383Z", 80);
+  const dryRun = req.body?.dryRun !== false;
+
+  let eventsQuery = supabase
+    .from("os_events")
+    .select("id,profile,model_key,provider,upstream_model,chat_scope,created_at,metadata")
+    .eq("chat_scope", "private")
+    .gte("created_at", since)
+    .order("id", { ascending: true })
+    .limit(limit);
+  if (profile) eventsQuery = eventsQuery.eq("profile", profile);
+  const eventsRes = await eventsQuery;
+  if (eventsRes.error) return res.status(500).json({ error: formatSupabaseError(eventsRes.error) });
+
+  const events = eventsRes.data || [];
+  const ids = events.map((event) => event.id);
+  let existing = new Set();
+  if (ids.length) {
+    const jobsRes = await supabase
+      .from("os_jobs")
+      .select("event_id")
+      .in("event_id", ids);
+    if (jobsRes.error) return res.status(500).json({ error: formatSupabaseError(jobsRes.error) });
+    existing = new Set((jobsRes.data || []).map((job) => String(job.event_id)));
+  }
+
+  const missing = events.filter((event) => !existing.has(String(event.id)));
+  const rows = missing.map((event) => {
+    const remember = Boolean(event.metadata?.remember);
+    return {
+      job_type: "interpret_episode",
+      status: "queued",
+      profile: event.profile,
+      priority: remember ? 0.8 : 0.45,
+      run_after: new Date().toISOString(),
+      event_id: event.id,
+      payload: {
+        model: event.model_key || findModelKeyForProfile(event.profile),
+        provider: event.provider,
+        upstreamModel: event.upstream_model,
+        remember,
+        backfilled: true
+      }
+    };
+  });
+
+  let inserted = [];
+  if (!dryRun && rows.length) {
+    const insertRes = await supabase
+      .from("os_jobs")
+      .insert(rows)
+      .select("id,event_id,profile,status,run_after");
+    if (insertRes.error) return res.status(500).json({ error: formatSupabaseError(insertRes.error) });
+    inserted = insertRes.data || [];
+    scheduleCognitiveWorker(inserted[0]?.id || null);
+  }
+
+  res.json({
+    profile: profile || "all",
+    since,
+    dryRun,
+    scanned: events.length,
+    missing: missing.length,
+    inserted: inserted.length,
+    firstMissingEventId: missing[0]?.id || null,
+    lastMissingEventId: missing.at(-1)?.id || null,
+    insertedJobIds: inserted.map((job) => job.id)
+  });
 });
 
 async function countRows(table, configure = (query) => query) {
