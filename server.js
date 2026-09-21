@@ -5847,6 +5847,24 @@ async function latestRows(table, { profile = "", select = "id,profile,status,cre
   };
 }
 
+async function blockedCognitiveJobs(profile = "") {
+  let query = supabase
+    .from("os_jobs")
+    .select("id,profile,status,attempts,max_attempts,run_after,locked_at,error,created_at,updated_at,completed_at")
+    .in("status", ["queued", "retry", "running"])
+    .order("id", { ascending: true })
+    .limit(8);
+  if (profile) query = query.eq("profile", profile);
+  const result = await query;
+  if (result.error) return { error: formatSupabaseError(result.error), rows: [] };
+  return {
+    rows: (result.data || []).map((row) => ({
+      ...row,
+      error: row.error ? truncateText(row.error, 180) : undefined
+    }))
+  };
+}
+
 app.post("/api/cognitive/status", async (req, res) => {
   if (!isAdminRequest(req)) return res.status(403).json({ error: "Bad or missing admin secret" });
   const profile = req.body?.profile ? resolveProfileKey(req.body.profile) : "";
@@ -5892,6 +5910,7 @@ app.post("/api/cognitive/status", async (req, res) => {
       rememberOnly: COGNITIVE_OS_INTERPRET_REMEMBER_ONLY
     },
     jobsByStatus,
+    blockedJobs: await blockedCognitiveJobs(profile),
     oldestJobs: await latestRows("os_jobs", {
       profile,
       select: "id,profile,status,attempts,max_attempts,run_after,locked_at,error,created_at,updated_at,completed_at",
