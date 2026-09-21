@@ -3237,6 +3237,7 @@ async function enqueueCognitiveInterpretation({ event, modelConfig, model, remem
       status: "queued",
       profile: modelConfig.profile,
       priority: remember ? 0.8 : 0.45,
+      run_after: new Date().toISOString(),
       event_id: event.id,
       payload: {
         model,
@@ -3286,7 +3287,7 @@ async function processCognitiveJobs({ jobId = null, limit = COGNITIVE_OS_JOB_BAT
     if (jobId) {
       query = query.eq("id", jobId);
     } else {
-      query = query.lte("run_after", new Date().toISOString());
+      query = query.or(`run_after.is.null,run_after.lte.${new Date().toISOString()}`);
     }
 
     const { data, error } = await query;
@@ -5745,6 +5746,79 @@ app.post("/api/cognitive/jobs/run", async (req, res) => {
   const limit = Math.max(1, Math.min(20, Number(req.body?.limit || COGNITIVE_OS_JOB_BATCH_LIMIT)));
   const result = await processCognitiveJobs({ limit });
   res.json(result);
+});
+
+async function countRows(table, configure = (query) => query) {
+  const result = await configure(supabase.from(table).select("id", { count: "exact", head: true }));
+  if (result.error) return { error: formatSupabaseError(result.error) };
+  return { count: result.count || 0 };
+}
+
+async function latestRows(table, { profile = "", select = "id,profile,status,created_at,updated_at", order = "id", limit = 5 } = {}) {
+  let query = supabase.from(table).select(select).order(order, { ascending: false }).limit(limit);
+  if (profile) query = query.eq("profile", profile);
+  const result = await query;
+  if (result.error) return { error: formatSupabaseError(result.error), rows: [] };
+  return {
+    rows: (result.data || []).map((row) => ({
+      ...row,
+      error: row.error ? truncateText(row.error, 180) : undefined,
+      result: undefined,
+      payload: undefined,
+      user_message: undefined,
+      model_reply: undefined,
+      content: undefined
+    }))
+  };
+}
+
+app.post("/api/cognitive/status", async (req, res) => {
+  if (!isAdminRequest(req)) return res.status(403).json({ error: "Bad or missing admin secret" });
+  const profile = req.body?.profile ? resolveProfileKey(req.body.profile) : "";
+  if (req.body?.profile && !profile) return res.status(404).json({ error: "Unknown profile" });
+  const statusValues = ["queued", "retry", "running", "failed", "completed"];
+  const jobsByStatus = {};
+
+  for (const status of statusValues) {
+    jobsByStatus[status] = await countRows("os_jobs", (query) => {
+      let filtered = query.eq("status", status);
+      if (profile) filtered = filtered.eq("profile", profile);
+      return filtered;
+    });
+  }
+
+  const tableFreshness = {};
+  for (const [table, config] of Object.entries({
+    os_events: { select: "id,profile,source,chat_scope,trigger_name,created_at", order: "id" },
+    os_jobs: { select: "id,profile,status,attempts,max_attempts,run_after,locked_at,error,created_at,updated_at,completed_at", order: "id" },
+    memory_atoms: { select: "id,profile,status,trigger_name,created_at", order: "id" },
+    causal_links: { select: "id,profile,status,trigger_name,created_at", order: "id" },
+    transfer_notes: { select: "id,profile,status,trigger_name,created_at", order: "id" },
+    state_cards: { select: "id,profile,status,updated_at,created_at", order: "id" },
+    state_snapshots: { select: "id,profile,created_at", order: "id" },
+    state_vectors: { select: "id,profile,created_at", order: "id" },
+    intentions: { select: "id,profile,status,updated_at,created_at", order: "id" },
+    meta_memory: { select: "id,profile,status,created_at", order: "id" },
+    core_change_proposals: { select: "id,profile,status,created_at,reviewed_at", order: "id" },
+    subject_space_nodes: { select: "id,profile,status,updated_at,created_at", order: "id" },
+    subject_space_objects: { select: "id,profile,status,updated_at,created_at", order: "id" },
+    subject_space_threads: { select: "id,profile,status,updated_at,created_at", order: "id" },
+    subject_space_relations: { select: "id,profile,status,updated_at,created_at", order: "id" }
+  })) {
+    tableFreshness[table] = await latestRows(table, { profile, ...config });
+  }
+
+  res.json({
+    profile: profile || "all",
+    now: new Date().toISOString(),
+    worker: {
+      enabled: COGNITIVE_OS_ENABLED && COGNITIVE_OS_WORKER_ENABLED,
+      autoInterpret: COGNITIVE_OS_AUTO_INTERPRET,
+      rememberOnly: COGNITIVE_OS_INTERPRET_REMEMBER_ONLY
+    },
+    jobsByStatus,
+    tableFreshness
+  });
 });
 
 app.post("/api/cognitive/retrieval-check", async (req, res) => {
