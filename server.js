@@ -5823,6 +5823,29 @@ app.post("/api/cognitive/jobs/backfill", async (req, res) => {
   });
 });
 
+app.post("/api/cognitive/repair/continuity-journal", async (req, res) => {
+  if (!isAdminRequest(req)) return res.status(403).json({ error: "Bad or missing admin secret" });
+  const { readFile } = await import("node:fs/promises");
+  const sql = await readFile(fileURLToPath(new URL("./supabase/continuity-journal.sql", import.meta.url)), "utf8");
+  const attempts = [
+    { sql },
+    { query: sql },
+    { p_sql: sql },
+    { p_query: sql }
+  ];
+  const errors = [];
+
+  for (const params of attempts) {
+    const result = await rawSupabase.rpc("exec_sql", params);
+    if (!result.error) {
+      return res.json({ ok: true, param: Object.keys(params)[0] });
+    }
+    errors.push({ param: Object.keys(params)[0], error: formatSupabaseError(result.error) });
+  }
+
+  res.status(500).json({ ok: false, errors });
+});
+
 async function countRows(table, configure = (query) => query) {
   const result = await configure(supabase.from(table).select("id", { count: "exact", head: true }));
   if (result.error) return { error: formatSupabaseError(result.error) };

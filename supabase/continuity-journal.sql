@@ -1,4 +1,4 @@
-create table public.continuity_job_steps (
+create table if not exists public.continuity_job_steps (
  job_id bigint references public.os_jobs(id) on delete cascade,
  step text not null, request jsonb not null, response jsonb,
  created_at timestamptz not null default now(), primary key(job_id,step)
@@ -7,7 +7,7 @@ alter table public.continuity_job_steps enable row level security;
 revoke all on public.continuity_job_steps from public,anon,authenticated;
 grant select,insert on public.continuity_job_steps to service_role;
 
-create function public.continuity_journal_step(p_job bigint,p_lease timestamptz,p_step text,p_request jsonb)
+create or replace function public.continuity_journal_step(p_job bigint,p_lease timestamptz,p_step text,p_request jsonb)
 returns jsonb language plpgsql security invoker set search_path='' as $$
 declare
  j public.os_jobs; cached public.continuity_job_steps;
@@ -29,12 +29,12 @@ begin
  if not (t=any(array['memory_atoms','state_cards','causal_links','state_snapshots','state_vectors','drift_events','intentions','transfer_notes','meta_memory','subject_spaces','subject_space_nodes','subject_space_edges','subject_space_objects','subject_space_threads','subject_space_relations','subject_space_changes','subject_proposals','core_change_proposals','core_nodes','os_events']) or t='episodes_'||profile_suffix or t='triggers_'||profile_suffix or t=fallback_table) then raise exception 'Table not allowed'; end if;
  if t='core_nodes' and op<>'select' then raise exception 'Core writes require review'; end if;
  if op not in ('select','insert','update','upsert') then raise exception 'Operation not allowed'; end if;
- if t='os_events' then
-   predicate := format('id=%L',j.event_id);
+if t='os_events' then
+   predicate := format('x.id=%L',j.event_id);
  elsif t=fallback_table then
-   predicate := format('id=(select fallback_row_id from public.os_events where id=%L)',j.event_id);
+   predicate := format('x.id=(select fallback_row_id from public.os_events where id=%L)',j.event_id);
  elsif t not in ('episodes_'||profile_suffix,'triggers_'||profile_suffix) then
-   predicate := format('profile=%L',j.profile);
+   predicate := format('x.profile=%L',j.profile);
    if op<>'select' and r->>'profile' is distinct from j.profile then raise exception 'Wrong profile'; end if;
  end if;
  if (t='os_events' or t=fallback_table) and op not in ('select','update') then raise exception 'Invalid source operation'; end if;
