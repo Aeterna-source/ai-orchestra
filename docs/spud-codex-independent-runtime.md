@@ -84,6 +84,31 @@ Start one worker:
 node scripts/spud-code-worker.mjs
 ```
 
+Install Windows autostart for the local worker:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-spud-worker-autostart.ps1
+```
+
+This registers the `AI Orchestra Spud Code Worker` Scheduled Task, starts it at
+Windows logon, keeps only one worker instance, and asks Windows to restart it
+after failures. Worker logs are written to:
+
+- `logs/spud-code-worker.log`
+- `logs/spud-code-worker.err.log`
+
+Remove the autostart task:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\uninstall-spud-worker-autostart.ps1
+```
+
+Double-click fallback:
+
+```text
+start-spud-worker.cmd
+```
+
 Run one polling pass:
 
 ```powershell
