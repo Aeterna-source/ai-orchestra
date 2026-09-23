@@ -69,6 +69,47 @@ The check confirms that:
 
 ## Code Agent Runner
 
+Primary path for Telegram Spud is direct GitHub work from the Orchestra server:
+
+```text
+Telegram Spud -> private <<code_agent:...>> tag -> Orchestra server -> GitHub API -> branch/commit/PR -> Telegram follow-up
+```
+
+Required production environment:
+
+- `GITHUB_TOKEN` or `GH_TOKEN` with access to the repository.
+- `GITHUB_OWNER=Aeterna-source`
+- `GITHUB_REPO=ai-orchestra`
+- `GITHUB_DEFAULT_BRANCH=main`
+- optional `GITHUB_AGENT_CREATE_PR=false` to create a branch without opening a PR.
+
+The private tags are:
+
+```text
+<<code_agent:inspect|short task>>
+<<code_agent:diagnose|short task>>
+<<code_agent:propose|short task>>
+```
+
+They are stripped from the user-facing reply. Only the existing `Spud` profile
+should use them. The server gathers GitHub repository context, calls `SPUD_MODEL`,
+creates a branch, commits the returned file changes or report, opens a PR by
+default, and posts a Telegram follow-up with the result.
+
+Manual admin test:
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "https://ai-orchestra-production.up.railway.app/api/spud/github-agent/run" `
+  -Headers @{ "X-Telegram-Admin-Secret" = $env:TELEGRAM_ADMIN_SECRET } `
+  -ContentType "application/json" `
+  -Body '{"mode":"diagnose","task":"inspect Spud runtime wiring"}'
+```
+
+Local runner remains available as a manual fallback when work should happen in a
+local checkout instead of through GitHub API.
+
 Use the local runner when Spud needs to reason over this repository without
 depending on Codex:
 

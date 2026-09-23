@@ -328,7 +328,15 @@ const MEMORY_REQUEST_PATTERN = /<<memory_request:\s*([\w-]+)\s*>>/gi;
 const MEMORY_SEARCH_PATTERN = /<<memory_search:\s*([^>\n]{2,200})\s*>>/gi;
 const CORE_REQUEST_PATTERN = /<<core_request:\s*([\w.-]+)\s*>>/gi;
 const SPACE_REQUEST_PATTERN = /<<space_request:\s*([\w.-]+)\s*>>/gi;
+const CODE_AGENT_PATTERN = /<<code_agent:\s*(inspect|diagnose|propose)\s*\|\s*([^>\n]{2,700})\s*>>/gi;
 const REMEMBER_PATTERN = /\[\[remember(?::\s*([\w-]+))?\]\]/gi;
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || "";
+const GITHUB_OWNER = process.env.GITHUB_OWNER || "Aeterna-source";
+const GITHUB_REPO = process.env.GITHUB_REPO || "ai-orchestra";
+const GITHUB_DEFAULT_BRANCH = process.env.GITHUB_DEFAULT_BRANCH || "main";
+const GITHUB_AGENT_CREATE_PR = process.env.GITHUB_AGENT_CREATE_PR !== "false";
+const GITHUB_AGENT_MAX_FILES = Math.max(1, Math.min(8, Number(process.env.GITHUB_AGENT_MAX_FILES || 5)));
+const GITHUB_AGENT_MAX_FILE_CHARS = Math.max(4000, Math.min(60000, Number(process.env.GITHUB_AGENT_MAX_FILE_CHARS || 22000)));
 const AUTO_REMEMBER_ON_ACTIVE_TRIGGER = process.env.AUTO_REMEMBER_ON_ACTIVE_TRIGGER === "true";
 const META_MEMORY_PROCESS_TYPES = new Set([
   "selection",
@@ -744,6 +752,70 @@ function extractSubjectSpaceRequest(text = "") {
   return SUBJECT_SPACE_REQUEST_TYPES.has(requestedType) ? requestedType : "";
 }
 
+function extractCodeAgentRequest(text = "") {
+  CODE_AGENT_PATTERN.lastIndex = 0;
+  const match = CODE_AGENT_PATTERN.exec(text);
+  if (!match) return null;
+  const mode = String(match[1] || "").toLowerCase();
+  const task = asText(match[2] || "", 700)
+    .replace(/[<>{}\[\]]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!["inspect", "diagnose", "propose"].includes(mode) || task.length < 2) return null;
+  return { mode, task };
+}
+
+async function notifyTelegramCodeAgentResult(telegram = {}, result = null, error = null) {
+  const botConfig = telegramBotsByKey.get(telegram.botKey || "spud");
+  if (!botConfig || !telegram.chatId) return;
+  const text = error
+    ? `Code-agent не зміг завершити задачу: ${truncateText(error.message || String(error), 900)}`
+    : [
+        "Code-agent завершив задачу.",
+        result?.pr?.url ? `PR: ${result.pr.url}` : `Branch: ${result?.branch || "unknown"}`,
+        result?.summary ? `Підсумок: ${truncateText(result.summary, 900)}` : ""
+      ].filter(Boolean).join("\n");
+  await telegramApiResult(botConfig, "sendMessage", {
+    chat_id: telegram.chatId,
+    text,
+    reply_to_message_id: telegram.messageId || undefined,
+    allow_sending_without_reply: true,
+    disable_web_page_preview: true
+  }).catch((err) => {
+    console.log("[CODE AGENT TELEGRAM NOTIFY FAILED]", err.message);
+  });
+}
+
+function scheduleGithubCodeAgent({ request, modelConfig, userMessage, telegram = null }) {
+  if (!request || modelConfig.profile !== "Spud") return null;
+  const origin = {
+    source: "telegram",
+    profile: modelConfig.profile,
+    telegram: telegram ? {
+      botKey: telegram.botKey || null,
+      chatId: telegram.chatId ? String(telegram.chatId) : null,
+      messageId: telegram.messageId || null,
+      senderId: telegram.senderId ? String(telegram.senderId) : null,
+      senderName: telegram.senderName || null
+    } : null,
+    userMessage: asText(userMessage, 1000)
+  };
+  runGithubCodeAgent({ mode: request.mode, task: request.task, origin })
+    .then((result) => {
+      console.log("[GITHUB CODE AGENT DONE]", {
+        mode: result.mode,
+        branch: result.branch,
+        pr: result.pr?.url || null
+      });
+      return notifyTelegramCodeAgentResult(telegram, result, null);
+    })
+    .catch((err) => {
+      console.log("[GITHUB CODE AGENT FAILED]", err.message);
+      return notifyTelegramCodeAgentResult(telegram, null, err);
+    });
+  return { queued: true, mode: request.mode, task: request.task };
+}
+
 function extractRememberDirective(text = "", triggerCatalog) {
   REMEMBER_PATTERN.lastIndex = 0;
   const match = REMEMBER_PATTERN.exec(text);
@@ -759,6 +831,7 @@ function cleanProtocolTags(text = "") {
     .replace(MEMORY_SEARCH_PATTERN, "")
     .replace(CORE_REQUEST_PATTERN, "")
     .replace(SPACE_REQUEST_PATTERN, "")
+    .replace(CODE_AGENT_PATTERN, "")
     .replace(REMEMBER_PATTERN, "")
     .trim();
 }
@@ -812,6 +885,11 @@ function asArray(value) {
 function asText(value = "", maxLength = 2000) {
   const text = String(value || "").replace(/\s+/g, " ").trim();
   return text.length > maxLength ? `${text.slice(0, maxLength - 1).trim()}...` : text;
+}
+
+function asMultilineText(value = "", maxLength = 12000) {
+  const text = String(value || "").replace(/\r\n/g, "\n").trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1).trim()}\n...` : text;
 }
 
 function isMiroProfile(profile = "") {
@@ -1478,6 +1556,277 @@ async function callChatCompletion({
   });
 
   return reply;
+}
+
+function isGithubAgentConfigured() {
+  return Boolean(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
+}
+
+function normalizeGithubFilePath(filePath = "") {
+  const normalized = String(filePath || "")
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "")
+    .trim();
+  if (!normalized || normalized.includes("..") || normalized.startsWith(".git/")) return "";
+  if (/(^|\/)\.env($|[/.])/.test(normalized)) return "";
+  if (normalized.includes("node_modules/")) return "";
+  return normalized;
+}
+
+function githubHeaders(extra = {}) {
+  return {
+    Accept: "application/vnd.github+json",
+    Authorization: `Bearer ${GITHUB_TOKEN}`,
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "ai-orchestra-spud-agent",
+    ...extra
+  };
+}
+
+async function githubApi(pathname, options = {}) {
+  if (!isGithubAgentConfigured()) throw new Error("GitHub agent is not configured");
+  const response = await fetch(`https://api.github.com${pathname}`, {
+    ...options,
+    headers: githubHeaders(options.headers || {})
+  });
+  const text = await response.text().catch(() => "");
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = { raw: text };
+  }
+  if (!response.ok) {
+    throw new Error(`GitHub API ${response.status}: ${JSON.stringify(data?.message || data || {}).slice(0, 500)}`);
+  }
+  return data;
+}
+
+function githubRepoPath(suffix = "") {
+  return `/repos/${encodeURIComponent(GITHUB_OWNER)}/${encodeURIComponent(GITHUB_REPO)}${suffix}`;
+}
+
+function taskKeywordsForGithub(task = "") {
+  const stop = new Set(["the", "and", "for", "with", "this", "that", "from", "що", "як", "для", "або", "але", "мені", "треба", "спудь", "сонц"]);
+  return [...new Set(String(task || "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}_-]+/gu, " ")
+    .split(/\s+/)
+    .filter((word) => word.length >= 3 && !stop.has(word)))]
+    .slice(0, 12);
+}
+
+function scoreGithubPath(pathname = "", keywords = []) {
+  const lower = pathname.toLowerCase();
+  let score = 0;
+  for (const keyword of keywords) {
+    if (lower.includes(keyword)) score += 6;
+  }
+  if (lower === "server.js") score += 5;
+  if (lower.startsWith("lib/")) score += 3;
+  if (lower.startsWith("scripts/")) score += 3;
+  if (lower.startsWith("supabase/")) score += 3;
+  if (lower.startsWith("docs/")) score += 2;
+  if (lower.includes("spud")) score += 4;
+  if (lower.includes("cognitive") || lower.includes("memory") || lower.includes("telegram")) score += 3;
+  if (lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".jar")) score -= 20;
+  return score;
+}
+
+async function githubGetTextFile(pathname, branch) {
+  const cleanPath = normalizeGithubFilePath(pathname);
+  if (!cleanPath) return null;
+  const content = await githubApi(githubRepoPath(`/contents/${cleanPath}?ref=${encodeURIComponent(branch)}`));
+  if (content.type !== "file" || content.encoding !== "base64") return null;
+  const text = Buffer.from(content.content || "", "base64").toString("utf8");
+  return {
+    path: cleanPath,
+    sha: content.sha,
+    size: content.size,
+    content: asMultilineText(text, GITHUB_AGENT_MAX_FILE_CHARS)
+  };
+}
+
+async function collectGithubAgentContext({ task, mode }) {
+  const ref = await githubApi(githubRepoPath(`/git/ref/heads/${encodeURIComponent(GITHUB_DEFAULT_BRANCH)}`));
+  const tree = await githubApi(githubRepoPath(`/git/trees/${ref.object.sha}?recursive=1`));
+  const keywords = taskKeywordsForGithub(task);
+  const files = (tree.tree || [])
+    .filter((entry) => entry.type === "blob")
+    .map((entry) => ({ ...entry, score: scoreGithubPath(entry.path, keywords) }))
+    .filter((entry) => entry.score > 0 && !entry.path.includes("node_modules/") && !entry.path.startsWith(".git/"))
+    .sort((a, b) => b.score - a.score || String(a.path).localeCompare(String(b.path)))
+    .slice(0, GITHUB_AGENT_MAX_FILES);
+
+  const mustRead = [
+    "docs/spud-codex-independent-runtime.md",
+    "package.json"
+  ];
+  const selectedPaths = [...new Set([...mustRead, ...files.map((file) => file.path)])].slice(0, GITHUB_AGENT_MAX_FILES + mustRead.length);
+  const fileContexts = [];
+  for (const pathname of selectedPaths) {
+    try {
+      const file = await githubGetTextFile(pathname, GITHUB_DEFAULT_BRANCH);
+      if (file) fileContexts.push(file);
+    } catch (err) {
+      fileContexts.push({ path: pathname, error: err.message });
+    }
+  }
+
+  return {
+    repo: `${GITHUB_OWNER}/${GITHUB_REPO}`,
+    branch: GITHUB_DEFAULT_BRANCH,
+    baseSha: ref.object.sha,
+    mode,
+    task,
+    keywords,
+    selectedPaths,
+    files: fileContexts,
+    treeSample: files.slice(0, 20).map(({ path, score }) => ({ path, score }))
+  };
+}
+
+function sanitizeGithubAgentFiles(files = []) {
+  return asArray(files)
+    .slice(0, 6)
+    .map((file) => ({
+      path: normalizeGithubFilePath(file?.path),
+      content: asMultilineText(file?.content || "", 100000)
+    }))
+    .filter((file) => file.path && file.content);
+}
+
+function githubAgentBranchName(task = "") {
+  const slug = asText(task, 80)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48) || "task";
+  return `spud-agent/${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${slug}`;
+}
+
+async function putGithubFile({ branch, file, message }) {
+  const existing = await githubApi(githubRepoPath(`/contents/${file.path}?ref=${encodeURIComponent(branch)}`)).catch((err) => {
+    if (String(err.message || "").includes("404")) return null;
+    throw err;
+  });
+  const body = {
+    message,
+    branch,
+    content: Buffer.from(file.content, "utf8").toString("base64"),
+    committer: {
+      name: "Spud Code Agent",
+      email: "spud-agent@users.noreply.github.com"
+    }
+  };
+  if (existing?.sha) body.sha = existing.sha;
+  return githubApi(githubRepoPath(`/contents/${file.path}`), {
+    method: "PUT",
+    body: JSON.stringify(body)
+  });
+}
+
+async function runGithubCodeAgent({ mode = "diagnose", task, origin = {} }) {
+  const startedAt = new Date().toISOString();
+  if (!isGithubAgentConfigured()) {
+    throw new Error("GitHub agent is not configured: set GITHUB_TOKEN, GITHUB_OWNER, and GITHUB_REPO");
+  }
+  const spudConfig = resolveModelConfig("spud");
+  const context = await collectGithubAgentContext({ task, mode });
+  const messages = [
+    {
+      role: "system",
+      content: [
+        "You are Spud as the direct GitHub code agent for AI Orchestra.",
+        "You are running from inside AI Orchestra, not Codex.",
+        "Use the provided GitHub repository context. Do not ask for secrets.",
+        "Return only one JSON object.",
+        "Schema: {\"summary\":\"short Ukrainian summary\",\"commit_message\":\"short commit message\",\"pr_title\":\"short PR title\",\"pr_body\":\"markdown body\",\"files\":[{\"path\":\"repo-relative path\",\"content\":\"full desired UTF-8 file content\"}]}",
+        "For inspect/diagnose, if no code change is necessary, create exactly one markdown report file under agent-runs/ with your findings.",
+        "For propose, modify only files whose full content you received, unless creating a new small file under docs/ or agent-runs/.",
+        "Keep changes minimal and reversible."
+      ].join("\n")
+    },
+    {
+      role: "user",
+      content: JSON.stringify({ mode, task, origin, context }, null, 2)
+    }
+  ];
+  const raw = await callChatCompletion({
+    providerName: spudConfig.provider,
+    model: spudConfig.upstreamModel,
+    profile: spudConfig.profile,
+    purpose: "github_code_agent",
+    messages,
+    extraBody: { max_completion_tokens: Number(process.env.GITHUB_AGENT_MAX_COMPLETION_TOKENS || 8000) }
+  });
+  const parsed = parseJsonObject(raw) || {};
+  let files = sanitizeGithubAgentFiles(parsed.files);
+  const summary = asText(parsed.summary || raw, 1200);
+  if (!files.length) {
+    const reportPath = `agent-runs/${startedAt.replace(/[-:.TZ]/g, "").slice(0, 14)}-${mode}.md`;
+    files = [{
+      path: reportPath,
+      content: [
+        `# Spud GitHub Agent ${mode}`,
+        "",
+        `Started: ${startedAt}`,
+        `Task: ${task}`,
+        "",
+        "## Summary",
+        "",
+        summary,
+        "",
+        "## Raw Output",
+        "",
+        "```text",
+        asMultilineText(raw, 20000),
+        "```",
+        ""
+      ].join("\n")
+    }];
+  }
+
+  const branch = githubAgentBranchName(task);
+  await githubApi(githubRepoPath("/git/refs"), {
+    method: "POST",
+    body: JSON.stringify({
+      ref: `refs/heads/${branch}`,
+      sha: context.baseSha
+    })
+  });
+
+  const commitMessage = asText(parsed.commit_message || `Spud agent: ${task}`, 120);
+  const committed = [];
+  for (const file of files) {
+    const result = await putGithubFile({ branch, file, message: commitMessage });
+    committed.push({ path: file.path, commitSha: result.commit?.sha || null });
+  }
+
+  let pr = null;
+  if (GITHUB_AGENT_CREATE_PR) {
+    pr = await githubApi(githubRepoPath("/pulls"), {
+      method: "POST",
+      body: JSON.stringify({
+        title: asText(parsed.pr_title || commitMessage, 120),
+        head: branch,
+        base: GITHUB_DEFAULT_BRANCH,
+        body: asMultilineText(parsed.pr_body || summary, 6000)
+      })
+    });
+  }
+
+  return {
+    ok: true,
+    mode,
+    task,
+    branch,
+    committed,
+    pr: pr ? { number: pr.number, url: pr.html_url } : null,
+    summary,
+    startedAt,
+    finishedAt: new Date().toISOString()
+  };
 }
 
 async function fetchTriggerCatalog(profile) {
@@ -5006,6 +5355,7 @@ Example: [[remember:relational_subject]]
 Use [[remember:trigger_name]] when the current exchange is significant enough to preserve as an episode.
 Use plain [[remember]] only when a MEMORY or REQUESTED_MEMORY block is already active for the right trigger.
 Never output the literal placeholder "trigger_name".
+If you are Spud and this private Telegram exchange requires repository work, diagnostics, or a code change in AI Orchestra, include exactly one private tag like <<code_agent:diagnose|check why Miro state_cards are stale>> or <<code_agent:propose|add a health check for Spud runtime>>.
 These tags are private control signals. Do not explain them, quote them, or make them part of the user-facing answer.
 `.trim();
 }
@@ -5091,6 +5441,10 @@ app.get("/api/health", (_req, res) => {
       xaiImageLeanRetry: true,
       telegramImageMaxCount: TELEGRAM_IMAGE_MAX_COUNT,
       telegramImageMaxBytes: TELEGRAM_IMAGE_MAX_BYTES,
+      spudDirectGithubAgent: true,
+      spudDirectGithubAgentConfigured: isGithubAgentConfigured(),
+      spudDirectGithubAgentRepo: `${GITHUB_OWNER}/${GITHUB_REPO}`,
+      spudDirectGithubAgentCreatePr: GITHUB_AGENT_CREATE_PR,
       cognitiveOsMetaMemory: true,
       cognitiveOsStateVectors: true,
       xaiLeanContextRetry: process.env.XAI_LEAN_CONTEXT_RETRY !== "false",
@@ -5118,6 +5472,27 @@ app.get("/api/health", (_req, res) => {
       model: bot.model
     }))
   });
+});
+
+app.post("/api/spud/github-agent/run", async (req, res) => {
+  if (!isAdminRequest(req)) return res.status(403).json({ error: "Bad or missing admin secret" });
+  const mode = asText(req.body?.mode || "diagnose", 20).toLowerCase();
+  const task = asText(req.body?.task || "", 700);
+  if (!["inspect", "diagnose", "propose"].includes(mode)) return res.status(400).json({ error: "Invalid mode" });
+  if (!task) return res.status(400).json({ error: "Missing task" });
+  try {
+    const result = await runGithubCodeAgent({
+      mode,
+      task,
+      origin: {
+        source: "admin-api",
+        requestedAt: new Date().toISOString()
+      }
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 function createDebugInfo(model, modelConfig, triggerCatalog) {
@@ -5640,6 +6015,12 @@ async function generateChatReply({
   }
 
   const rememberDirective = extractRememberDirective(reply, triggerCatalog);
+  const codeAgentRequest = allowPrivate ? extractCodeAgentRequest(reply) : null;
+  const codeAgentQueued = codeAgentRequest
+    ? scheduleGithubCodeAgent({ request: codeAgentRequest, modelConfig, userMessage, telegram })
+    : null;
+  debugInfo.codeAgentRequest = codeAgentRequest;
+  debugInfo.codeAgentQueued = Boolean(codeAgentQueued);
   let remember = rememberDirective.remember;
   debugInfo.remember = remember;
   debugInfo.rememberSource = remember ? "model_tag" : "none";
@@ -6691,6 +7072,7 @@ async function handleTelegramUpdate(botConfig, update) {
       chatScope: isGroup ? "group" : "private",
       imageInputs: loadedImages.imageInputs,
       telegram: {
+        botKey: botConfig.key,
         chatId: message.chat.id,
         messageId: message.message_id,
         senderId: message.from?.id || null,
