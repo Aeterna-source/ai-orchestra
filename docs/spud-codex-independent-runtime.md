@@ -78,6 +78,17 @@ Telegram Spud -> private <<code_agent:...>> tag -> Orchestra server queue -> loc
 The worker runs in a real checkout, so it can inspect the working tree, use `rg`,
 run tests, and produce durable artifacts under `agent-runs/`.
 
+Worker completions are also recorded in Spud's working laboratory:
+
+- table: `spud_lab_entries`
+- endpoint: `/api/spud/lab/entries`
+- prompt block: `SPUD_LABORATORY`
+
+The lab is a working surface for reports, proposals, changes, plans, decisions,
+and artifacts from Spud's code/system work. It is not a replacement identity and
+does not override Core or source memory; it gives Spud a stable desk for the
+technical trail.
+
 Start one worker:
 
 ```powershell
