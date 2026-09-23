@@ -4,7 +4,9 @@
   "main": "server.js",
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "spud:runtime": "node scripts/verify-spud-runtime.mjs",
+    "spud:agent": "node scripts/spud-code-agent.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.39.8",

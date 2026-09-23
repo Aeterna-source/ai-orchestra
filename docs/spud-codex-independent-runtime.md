@@ -66,3 +66,29 @@ The check confirms that:
 - OpenAI is configured;
 - the Spud Telegram route points to `spud`;
 - live source memory and cognitive OS are enabled.
+
+## Code Agent Runner
+
+Use the local runner when Spud needs to reason over this repository without
+depending on Codex:
+
+```powershell
+node scripts/spud-code-agent.mjs --task "diagnose why Miro state_cards are stale" --mode diagnose
+```
+
+For a context-only dry run:
+
+```powershell
+node scripts/spud-code-agent.mjs --task "inspect Spud runtime" --mode inspect --no-model
+```
+
+The runner gathers:
+
+- production health from `AI_ORCHESTRA_BASE_URL`;
+- `git status` and recent commits;
+- `rg` matches from repository files, excluding secrets and generated folders;
+- selected repo files such as this runtime contract.
+
+It calls `SPUD_MODEL` through `OPENAI_API_KEY` and asks the existing Spud runtime
+to inspect, diagnose, or propose a minimal patch plan. It does not apply patches,
+push, deploy, or execute production repairs by itself.
