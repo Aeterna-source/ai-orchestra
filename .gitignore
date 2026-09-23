@@ -1,5 +1,6 @@
 .env
 *.log
+agent-runs/
 node_modules/
 .gradle/
 build/

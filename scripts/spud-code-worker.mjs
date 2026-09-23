@@ -101,10 +101,11 @@ async function runSpudAgent(job) {
     "--out", relativeOutputPath
   ];
   const startedAt = new Date().toISOString();
-  const command = `node ${args.map((part) => JSON.stringify(part)).join(" ")}`;
+  const nodePath = process.env.SPUD_NODE_PATH || process.execPath;
+  const command = `${JSON.stringify(nodePath)} ${args.map((part) => JSON.stringify(part)).join(" ")}`;
 
   try {
-    const child = await execFileAsync("node", args, {
+    const child = await execFileAsync(nodePath, args, {
       cwd: repoRoot,
       timeout: Number(process.env.SPUD_WORKER_JOB_TIMEOUT_MS || 180000),
       maxBuffer: 8 * 1024 * 1024,

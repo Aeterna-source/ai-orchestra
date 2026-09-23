@@ -91,6 +91,11 @@ function redact(value) {
     .replace(/(xox[baprs]-[A-Za-z0-9-]+)/g, "[REDACTED_TOKEN]");
 }
 
+function toolPath(name) {
+  const envName = `SPUD_${name.toUpperCase()}_PATH`;
+  return process.env[envName] || name;
+}
+
 async function runCommand(command, args, { timeout = 20_000 } = {}) {
   try {
     const result = await execFileAsync(command, args, {
@@ -171,7 +176,7 @@ async function readContextFile(filePath) {
 }
 
 async function listNodeTests() {
-  const result = await runCommand("rg", ["--files", "tests"], { timeout: 10_000 });
+  const result = await runCommand(toolPath("rg"), ["--files", "tests"], { timeout: 10_000 });
   if (!result.ok) return [];
   return result.stdout
     .split(/\r?\n/)
@@ -189,7 +194,7 @@ async function runNodeTests() {
       stderr: "No tests/*.test.mjs files found."
     };
   }
-  return runCommand("node", ["--test", ...tests], { timeout: 60_000 });
+  return runCommand(process.env.SPUD_NODE_PATH || process.execPath, ["--test", ...tests], { timeout: 60_000 });
 }
 
 async function applyPatchMode(args) {
@@ -199,8 +204,8 @@ async function applyPatchMode(args) {
 
   const patchPath = normalizeRepoPath(args.patchFile);
   await readFile(path.join(repoRoot, patchPath), "utf8");
-  const before = await runCommand("git", ["status", "--short"]);
-  const check = await runCommand("git", ["apply", "--check", "--", patchPath], { timeout: 30_000 });
+  const before = await runCommand(toolPath("git"), ["status", "--short"]);
+  const check = await runCommand(toolPath("git"), ["apply", "--check", "--", patchPath], { timeout: 30_000 });
   const result = {
     ok: false,
     mode: "apply",
@@ -214,21 +219,21 @@ async function applyPatchMode(args) {
   };
 
   if (!check.ok) {
-    result.after = await runCommand("git", ["status", "--short"]);
+    result.after = await runCommand(toolPath("git"), ["status", "--short"]);
     return result;
   }
 
   if (!args.confirmApply) {
     result.ok = true;
-    result.after = await runCommand("git", ["status", "--short"]);
+    result.after = await runCommand(toolPath("git"), ["status", "--short"]);
     return result;
   }
 
-  const apply = await runCommand("git", ["apply", "--", patchPath], { timeout: 30_000 });
+  const apply = await runCommand(toolPath("git"), ["apply", "--", patchPath], { timeout: 30_000 });
   result.apply = apply;
   result.applied = apply.ok;
   if (!apply.ok) {
-    result.after = await runCommand("git", ["status", "--short"]);
+    result.after = await runCommand(toolPath("git"), ["status", "--short"]);
     return result;
   }
 
@@ -236,7 +241,7 @@ async function applyPatchMode(args) {
     result.tests = await runNodeTests();
   }
 
-  result.after = await runCommand("git", ["status", "--short"]);
+  result.after = await runCommand(toolPath("git"), ["status", "--short"]);
   result.ok = Boolean(apply.ok && (!args.runTests || result.tests?.ok));
   return result;
 }
@@ -244,7 +249,7 @@ async function applyPatchMode(args) {
 async function gatherContext(task, explicitFiles) {
   const keywords = taskKeywords(task);
   const rgPattern = keywords.length > 0 ? keywords.join("|") : "spud|cognitive|memory|provider";
-  const rg = await runCommand("rg", [
+  const rg = await runCommand(toolPath("rg"), [
     "-n",
     "--glob", "!node_modules/**",
     "--glob", "!.git/**",
@@ -278,8 +283,8 @@ async function gatherContext(task, explicitFiles) {
     baseUrl,
     model,
     health: await fetchHealth(),
-    gitStatus: await runCommand("git", ["status", "--short"]),
-    gitLog: await runCommand("git", ["log", "--oneline", "-5"]),
+    gitStatus: await runCommand(toolPath("git"), ["status", "--short"]),
+    gitLog: await runCommand(toolPath("git"), ["log", "--oneline", "-5"]),
     search: rg,
     files
   };
