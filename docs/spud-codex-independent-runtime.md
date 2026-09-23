@@ -69,7 +69,57 @@ The check confirms that:
 
 ## Code Agent Runner
 
-Primary path for Telegram Spud is direct GitHub work from the Orchestra server:
+Primary path for Telegram Spud is the local repository worker:
+
+```text
+Telegram Spud -> private <<code_agent:...>> tag -> Orchestra server queue -> local worker -> repo checkout -> artifact -> Telegram follow-up
+```
+
+The worker runs in a real checkout, so it can inspect the working tree, use `rg`,
+run tests, and produce durable artifacts under `agent-runs/`.
+
+Start one worker:
+
+```powershell
+node scripts/spud-code-worker.mjs
+```
+
+Run one polling pass:
+
+```powershell
+node scripts/spud-code-worker.mjs --once --worker-id spud-local
+```
+
+Required worker environment:
+
+- `TELEGRAM_ADMIN_SECRET` or `COGNITIVE_ADMIN_SECRET`
+- `OPENAI_API_KEY`
+- `SPUD_MODEL=gpt-5.5`
+- optional `AI_ORCHESTRA_BASE_URL`
+
+Queue setup on production:
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "https://ai-orchestra-production.up.railway.app/api/spud/code-agent/repair" `
+  -Headers @{ "X-Telegram-Admin-Secret" = $env:TELEGRAM_ADMIN_SECRET } `
+  -ContentType "application/json" `
+  -Body '{}'
+```
+
+Manual enqueue:
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "https://ai-orchestra-production.up.railway.app/api/spud/code-agent/jobs/enqueue" `
+  -Headers @{ "X-Telegram-Admin-Secret" = $env:TELEGRAM_ADMIN_SECRET } `
+  -ContentType "application/json" `
+  -Body '{"mode":"diagnose","task":"inspect Spud runtime wiring"}'
+```
+
+Direct GitHub work from the Orchestra server is available as a fallback:
 
 ```text
 Telegram Spud -> private <<code_agent:...>> tag -> Orchestra server -> GitHub API -> branch/commit/PR -> Telegram follow-up
@@ -92,9 +142,8 @@ The private tags are:
 ```
 
 They are stripped from the user-facing reply. Only the existing `Spud` profile
-should use them. The server gathers GitHub repository context, calls `SPUD_MODEL`,
-creates a branch, commits the returned file changes or report, opens a PR by
-default, and posts a Telegram follow-up with the result.
+should use them. By default these tags enqueue worker jobs. The direct GitHub
+admin endpoint remains available when work must happen without a local checkout.
 
 Manual admin test:
 

@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "spud:runtime": "node scripts/verify-spud-runtime.mjs",
-    "spud:agent": "node scripts/spud-code-agent.mjs"
+    "spud:agent": "node scripts/spud-code-agent.mjs",
+    "spud:worker": "node scripts/spud-code-worker.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.39.8",

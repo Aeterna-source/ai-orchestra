@@ -337,6 +337,7 @@ const GITHUB_DEFAULT_BRANCH = process.env.GITHUB_DEFAULT_BRANCH || "main";
 const GITHUB_AGENT_CREATE_PR = process.env.GITHUB_AGENT_CREATE_PR !== "false";
 const GITHUB_AGENT_MAX_FILES = Math.max(1, Math.min(8, Number(process.env.GITHUB_AGENT_MAX_FILES || 5)));
 const GITHUB_AGENT_MAX_FILE_CHARS = Math.max(4000, Math.min(60000, Number(process.env.GITHUB_AGENT_MAX_FILE_CHARS || 22000)));
+const SPUD_CODE_AGENT_JOB_TABLE = process.env.SPUD_CODE_AGENT_JOB_TABLE || "spud_code_agent_jobs";
 const AUTO_REMEMBER_ON_ACTIVE_TRIGGER = process.env.AUTO_REMEMBER_ON_ACTIVE_TRIGGER === "true";
 const META_MEMORY_PROCESS_TYPES = new Set([
   "selection",
@@ -786,11 +787,37 @@ async function notifyTelegramCodeAgentResult(telegram = {}, result = null, error
   });
 }
 
-function scheduleGithubCodeAgent({ request, modelConfig, userMessage, telegram = null }) {
+async function notifyTelegramWorkerResult(job = {}, result = null, error = null) {
+  const telegram = job.telegram || {};
+  const botConfig = telegramBotsByKey.get(telegram.botKey || "spud");
+  if (!botConfig || !telegram.chatId) return;
+  const text = error
+    ? `Code-worker не зміг завершити задачу #${job.id}: ${truncateText(error.message || String(error), 900)}`
+    : [
+        `Code-worker завершив задачу #${job.id}.`,
+        result?.outputPath ? `Artifact: ${result.outputPath}` : "",
+        result?.summary ? `Підсумок: ${truncateText(result.summary, 900)}` : "",
+        result?.tests?.ok === false ? "Тести не пройшли, треба дивитися artifact." : ""
+      ].filter(Boolean).join("\n");
+  await telegramApiResult(botConfig, "sendMessage", {
+    chat_id: telegram.chatId,
+    text,
+    reply_to_message_id: telegram.messageId || undefined,
+    allow_sending_without_reply: true,
+    disable_web_page_preview: true
+  }).catch((err) => {
+    console.log("[CODE WORKER TELEGRAM NOTIFY FAILED]", err.message);
+  });
+}
+
+async function enqueueSpudCodeAgentJob({ request, modelConfig, userMessage, telegram = null }) {
   if (!request || modelConfig.profile !== "Spud") return null;
-  const origin = {
-    source: "telegram",
+  const row = {
+    status: "queued",
+    mode: request.mode,
+    task: request.task,
     profile: modelConfig.profile,
+    source: "telegram",
     telegram: telegram ? {
       botKey: telegram.botKey || null,
       chatId: telegram.chatId ? String(telegram.chatId) : null,
@@ -798,22 +825,90 @@ function scheduleGithubCodeAgent({ request, modelConfig, userMessage, telegram =
       senderId: telegram.senderId ? String(telegram.senderId) : null,
       senderName: telegram.senderName || null
     } : null,
-    userMessage: asText(userMessage, 1000)
+    payload: {
+      userMessage: asText(userMessage, 1000),
+      model: "spud"
+    },
+    run_after: new Date().toISOString()
   };
-  runGithubCodeAgent({ mode: request.mode, task: request.task, origin })
-    .then((result) => {
-      console.log("[GITHUB CODE AGENT DONE]", {
-        mode: result.mode,
-        branch: result.branch,
-        pr: result.pr?.url || null
-      });
-      return notifyTelegramCodeAgentResult(telegram, result, null);
+  const result = await supabase
+    .from(SPUD_CODE_AGENT_JOB_TABLE)
+    .insert(row)
+    .select("id,mode,task,status")
+    .single();
+  if (result.error) {
+    console.log("[SPUD CODE AGENT ENQUEUE FAILED]", formatSupabaseError(result.error));
+    return null;
+  }
+  console.log("[SPUD CODE AGENT QUEUED]", {
+    id: result.data.id,
+    mode: result.data.mode
+  });
+  return result.data;
+}
+
+async function claimSpudCodeAgentJob(workerId = "spud-worker") {
+  const now = new Date().toISOString();
+  const scan = await supabase
+    .from(SPUD_CODE_AGENT_JOB_TABLE)
+    .select("*")
+    .eq("status", "queued")
+    .lte("run_after", now)
+    .order("run_after", { ascending: true })
+    .order("id", { ascending: true })
+    .limit(1);
+  if (scan.error) throw new Error(`Code-agent job scan failed: ${JSON.stringify(formatSupabaseError(scan.error))}`);
+  const job = scan.data?.[0];
+  if (!job) return null;
+
+  const claimed = await supabase
+    .from(SPUD_CODE_AGENT_JOB_TABLE)
+    .update({
+      status: "running",
+      attempts: (job.attempts || 0) + 1,
+      locked_at: new Date().toISOString(),
+      locked_by: asText(workerId, 120),
+      error: null,
+      updated_at: new Date().toISOString()
     })
-    .catch((err) => {
-      console.log("[GITHUB CODE AGENT FAILED]", err.message);
-      return notifyTelegramCodeAgentResult(telegram, null, err);
-    });
-  return { queued: true, mode: request.mode, task: request.task };
+    .eq("id", job.id)
+    .eq("status", "queued")
+    .select("*")
+    .maybeSingle();
+  if (claimed.error) throw new Error(`Code-agent job claim failed: ${JSON.stringify(formatSupabaseError(claimed.error))}`);
+  return claimed.data || null;
+}
+
+async function completeSpudCodeAgentJob({ jobId, workerId, ok, result = null, error = "" }) {
+  const existing = await supabase
+    .from(SPUD_CODE_AGENT_JOB_TABLE)
+    .select("*")
+    .eq("id", jobId)
+    .maybeSingle();
+  if (existing.error) throw new Error(`Code-agent job load failed: ${JSON.stringify(formatSupabaseError(existing.error))}`);
+  if (!existing.data) throw new Error("Code-agent job not found");
+
+  const status = ok ? "completed" : ((existing.data.attempts || 0) >= (existing.data.max_attempts || 3) ? "failed" : "queued");
+  const update = await supabase
+    .from(SPUD_CODE_AGENT_JOB_TABLE)
+    .update({
+      status,
+      result: result || null,
+      error: ok ? null : asText(error, 1200),
+      run_after: ok ? existing.data.run_after : new Date(Date.now() + 60_000).toISOString(),
+      completed_at: ok || status === "failed" ? new Date().toISOString() : null,
+      updated_at: new Date().toISOString()
+    })
+    .eq("id", jobId)
+    .eq("status", "running")
+    .eq("locked_by", asText(workerId, 120))
+    .select("*")
+    .maybeSingle();
+  if (update.error || !update.data) throw new Error(`Code-agent job completion failed: ${JSON.stringify(formatSupabaseError(update.error))}`);
+  if (ok || status === "failed") {
+    await notifyTelegramWorkerResult(update.data, result, ok ? null : new Error(error || "Worker failed"));
+  }
+  return update.data;
 }
 
 function extractRememberDirective(text = "", triggerCatalog) {
@@ -5441,6 +5536,8 @@ app.get("/api/health", (_req, res) => {
       xaiImageLeanRetry: true,
       telegramImageMaxCount: TELEGRAM_IMAGE_MAX_COUNT,
       telegramImageMaxBytes: TELEGRAM_IMAGE_MAX_BYTES,
+      spudCodeAgentWorkerQueue: true,
+      spudCodeAgentJobTable: SPUD_CODE_AGENT_JOB_TABLE,
       spudDirectGithubAgent: true,
       spudDirectGithubAgentConfigured: isGithubAgentConfigured(),
       spudDirectGithubAgentRepo: `${GITHUB_OWNER}/${GITHUB_REPO}`,
@@ -5490,6 +5587,77 @@ app.post("/api/spud/github-agent/run", async (req, res) => {
       }
     });
     res.json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/spud/code-agent/repair", async (req, res) => {
+  if (!isAdminRequest(req)) return res.status(403).json({ error: "Bad or missing admin secret" });
+  const { readFile } = await import("node:fs/promises");
+  const sql = await readFile(fileURLToPath(new URL("./supabase/spud_code_agent_jobs.sql", import.meta.url)), "utf8");
+  const attempts = [
+    { sql },
+    { query: sql },
+    { p_sql: sql },
+    { p_query: sql }
+  ];
+  const errors = [];
+  for (const params of attempts) {
+    const result = await rawSupabase.rpc("exec_sql", params);
+    if (!result.error) return res.json({ ok: true, param: Object.keys(params)[0] });
+    errors.push({ param: Object.keys(params)[0], error: formatSupabaseError(result.error) });
+  }
+  res.status(500).json({ ok: false, errors });
+});
+
+app.post("/api/spud/code-agent/jobs/enqueue", async (req, res) => {
+  if (!isAdminRequest(req)) return res.status(403).json({ error: "Bad or missing admin secret" });
+  const mode = asText(req.body?.mode || "diagnose", 20).toLowerCase();
+  const task = asText(req.body?.task || "", 700);
+  if (!["inspect", "diagnose", "propose"].includes(mode)) return res.status(400).json({ error: "Invalid mode" });
+  if (!task) return res.status(400).json({ error: "Missing task" });
+  const result = await supabase
+    .from(SPUD_CODE_AGENT_JOB_TABLE)
+    .insert({
+      status: "queued",
+      mode,
+      task,
+      profile: "Spud",
+      source: "admin-api",
+      payload: req.body?.payload && typeof req.body.payload === "object" ? req.body.payload : {},
+      run_after: new Date().toISOString()
+    })
+    .select("id,status,mode,task,created_at")
+    .single();
+  if (result.error) return res.status(500).json({ error: formatSupabaseError(result.error) });
+  res.json({ ok: true, job: result.data });
+});
+
+app.post("/api/spud/code-agent/jobs/claim", async (req, res) => {
+  if (!isAdminRequest(req)) return res.status(403).json({ error: "Bad or missing admin secret" });
+  try {
+    const workerId = asText(req.body?.workerId || "spud-worker", 120);
+    const job = await claimSpudCodeAgentJob(workerId);
+    res.json({ ok: true, job });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/spud/code-agent/jobs/:id/complete", async (req, res) => {
+  if (!isAdminRequest(req)) return res.status(403).json({ error: "Bad or missing admin secret" });
+  const jobId = Number(req.params.id);
+  if (!Number.isInteger(jobId) || jobId <= 0) return res.status(400).json({ error: "Invalid job id" });
+  try {
+    const job = await completeSpudCodeAgentJob({
+      jobId,
+      workerId: asText(req.body?.workerId || "spud-worker", 120),
+      ok: req.body?.ok !== false,
+      result: req.body?.result && typeof req.body.result === "object" ? req.body.result : null,
+      error: asText(req.body?.error || "", 1200)
+    });
+    res.json({ ok: true, job });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -6017,7 +6185,7 @@ async function generateChatReply({
   const rememberDirective = extractRememberDirective(reply, triggerCatalog);
   const codeAgentRequest = allowPrivate ? extractCodeAgentRequest(reply) : null;
   const codeAgentQueued = codeAgentRequest
-    ? scheduleGithubCodeAgent({ request: codeAgentRequest, modelConfig, userMessage, telegram })
+    ? await enqueueSpudCodeAgentJob({ request: codeAgentRequest, modelConfig, userMessage, telegram })
     : null;
   debugInfo.codeAgentRequest = codeAgentRequest;
   debugInfo.codeAgentQueued = Boolean(codeAgentQueued);
