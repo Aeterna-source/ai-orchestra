@@ -9,7 +9,7 @@ const repoRoot = process.cwd();
 const defaultBaseUrl = "https://ai-orchestra-production.up.railway.app";
 const baseUrl = (process.env.AI_ORCHESTRA_BASE_URL || defaultBaseUrl).replace(/\/$/, "");
 const model = process.env.SPUD_MODEL || "gpt-5.5";
-const modeValues = new Set(["inspect", "diagnose", "propose"]);
+const modeValues = new Set(["inspect", "diagnose", "propose", "apply"]);
 const maxOutputChars = 24_000;
 const maxFileChars = 8_000;
 
@@ -33,7 +33,15 @@ async function loadLocalEnv() {
 }
 
 function parseArgs(argv) {
-  const args = { mode: "diagnose", files: [], noModel: false, out: "" };
+  const args = {
+    mode: "diagnose",
+    files: [],
+    noModel: false,
+    out: "",
+    patchFile: "",
+    confirmApply: false,
+    runTests: false
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--task") args.task = argv[++i];
@@ -41,6 +49,9 @@ function parseArgs(argv) {
     else if (arg === "--file") args.files.push(argv[++i]);
     else if (arg === "--no-model") args.noModel = true;
     else if (arg === "--out") args.out = argv[++i];
+    else if (arg === "--patch-file") args.patchFile = argv[++i];
+    else if (arg === "--confirm-apply") args.confirmApply = true;
+    else if (arg === "--run-tests") args.runTests = true;
     else if (arg === "--help" || arg === "-h") args.help = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -50,11 +61,15 @@ function parseArgs(argv) {
 function usage() {
   return `Usage:
   node scripts/spud-code-agent.mjs --task "diagnose cognitive queue" [--mode inspect|diagnose|propose]
+  node scripts/spud-code-agent.mjs --mode apply --patch-file agent-runs/fix.patch [--confirm-apply] [--run-tests]
 
 Options:
   --file <path>   Add an explicit repo-relative file to the context. Repeatable.
   --no-model      Gather context without calling SPUD_MODEL.
   --out <path>    Write the final agent output to a repo-relative file.
+  --patch-file    Repo-relative unified diff to check/apply in apply mode.
+  --confirm-apply Actually apply the checked patch. Without this, apply mode is check-only.
+  --run-tests     After applying, run the local Node test suite.
 
 Environment:
   OPENAI_API_KEY              Required unless --no-model is used.
@@ -136,7 +151,7 @@ async function fetchHealth() {
 
 function normalizeRepoPath(filePath) {
   const normalized = path.normalize(filePath || "");
-  if (path.isAbsolute(normalized) || normalized.startsWith("..")) {
+  if (path.isAbsolute(normalized) || normalized === "." || normalized.startsWith("..")) {
     throw new Error(`Only repo-relative files are allowed: ${filePath}`);
   }
   if (/(^|[\\/])\.env($|[\\/])/.test(normalized) || normalized.includes("node_modules")) {
@@ -153,6 +168,77 @@ async function readContextFile(filePath) {
     path: normalized.replace(/\\/g, "/"),
     content: truncate(redact(text), maxFileChars)
   };
+}
+
+async function listNodeTests() {
+  const result = await runCommand("rg", ["--files", "tests"], { timeout: 10_000 });
+  if (!result.ok) return [];
+  return result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.endsWith(".test.mjs"));
+}
+
+async function runNodeTests() {
+  const tests = await listNodeTests();
+  if (tests.length === 0) {
+    return {
+      ok: false,
+      command: "node --test <tests>",
+      stdout: "",
+      stderr: "No tests/*.test.mjs files found."
+    };
+  }
+  return runCommand("node", ["--test", ...tests], { timeout: 60_000 });
+}
+
+async function applyPatchMode(args) {
+  if (!args.patchFile) {
+    throw new Error("Apply mode requires --patch-file.");
+  }
+
+  const patchPath = normalizeRepoPath(args.patchFile);
+  await readFile(path.join(repoRoot, patchPath), "utf8");
+  const before = await runCommand("git", ["status", "--short"]);
+  const check = await runCommand("git", ["apply", "--check", "--", patchPath], { timeout: 30_000 });
+  const result = {
+    ok: false,
+    mode: "apply",
+    patchFile: patchPath.replace(/\\/g, "/"),
+    before,
+    check,
+    applied: false,
+    apply: null,
+    tests: null,
+    after: null
+  };
+
+  if (!check.ok) {
+    result.after = await runCommand("git", ["status", "--short"]);
+    return result;
+  }
+
+  if (!args.confirmApply) {
+    result.ok = true;
+    result.after = await runCommand("git", ["status", "--short"]);
+    return result;
+  }
+
+  const apply = await runCommand("git", ["apply", "--", patchPath], { timeout: 30_000 });
+  result.apply = apply;
+  result.applied = apply.ok;
+  if (!apply.ok) {
+    result.after = await runCommand("git", ["status", "--short"]);
+    return result;
+  }
+
+  if (args.runTests) {
+    result.tests = await runNodeTests();
+  }
+
+  result.after = await runCommand("git", ["status", "--short"]);
+  result.ok = Boolean(apply.ok && (!args.runTests || result.tests?.ok));
+  return result;
 }
 
 async function gatherContext(task, explicitFiles) {
@@ -253,12 +339,19 @@ async function callSpud(messages) {
 async function main() {
   await loadLocalEnv();
   const args = parseArgs(process.argv.slice(2));
+  if (args.mode === "apply" && !args.task) args.task = "Apply a reviewed patch file.";
   if (args.help || !args.task) {
     console.log(usage());
     process.exit(args.help ? 0 : 1);
   }
   if (!modeValues.has(args.mode)) {
     throw new Error(`Invalid mode: ${args.mode}`);
+  }
+
+  if (args.mode === "apply") {
+    const result = await applyPatchMode(args);
+    console.log(JSON.stringify(result, null, 2));
+    process.exit(result.ok ? 0 : 1);
   }
 
   const context = await gatherContext(args.task, args.files);

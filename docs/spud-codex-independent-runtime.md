@@ -92,3 +92,27 @@ The runner gathers:
 It calls `SPUD_MODEL` through `OPENAI_API_KEY` and asks the existing Spud runtime
 to inspect, diagnose, or propose a minimal patch plan. It does not apply patches,
 push, deploy, or execute production repairs by itself.
+
+## Controlled Apply
+
+Patch application is a separate explicit step. First check a reviewed unified
+diff:
+
+```powershell
+node scripts/spud-code-agent.mjs --mode apply --patch-file agent-runs/fix.patch
+```
+
+Apply it only with explicit confirmation:
+
+```powershell
+node scripts/spud-code-agent.mjs --mode apply --patch-file agent-runs/fix.patch --confirm-apply --run-tests
+```
+
+Controlled apply:
+
+- accepts only repo-relative patch files;
+- refuses absolute paths, parent-directory paths, `.env`, and `node_modules`;
+- runs `git apply --check` before applying;
+- applies only when `--confirm-apply` is present;
+- can run the local Node test suite after applying;
+- never commits, pushes, deploys, or runs production repair endpoints.
