@@ -766,6 +766,89 @@ function extractCodeAgentRequest(text = "") {
   return { mode, task };
 }
 
+function inferDirectSpudCodeAgentRequest(userMessage = "", modelConfig = {}, { allowPrivate = false, source = "" } = {}) {
+  if (!allowPrivate || source !== "telegram" || modelConfig.profile !== "Spud") return null;
+  const raw = asText(userMessage, 1200).replace(/\s+/g, " ").trim();
+  if (!raw) return null;
+  const text = raw.toLowerCase();
+  const hasCodeSurface = [
+    "код",
+    "репозитор",
+    "repo",
+    "repository",
+    "github",
+    "git ",
+    "worker",
+    "воркер",
+    "лог",
+    "logs",
+    "health",
+    "pipeline",
+    "пайплайн",
+    "черг",
+    "queue",
+    "jobs",
+    "os_jobs",
+    "os_events",
+    "таблиц",
+    "supabase",
+    "railway"
+  ].some((term) => text.includes(term));
+  const hasAction = [
+    "перевір",
+    "подив",
+    "глянь",
+    "переглян",
+    "діагност",
+    "аудит",
+    "inspect",
+    "diagnos",
+    "audit",
+    "знайди",
+    "чому",
+    "полам",
+    "не працю",
+    "непрац",
+    "працює",
+    "виправ",
+    "пофікс",
+    "зроби",
+    "прав"
+  ].some((term) => text.includes(term));
+  if (!hasCodeSurface || !hasAction) return null;
+
+  const mode = [
+    "виправ",
+    "пофікс",
+    "поправ",
+    "додай",
+    "зміни",
+    "реаліз",
+    "patch",
+    "change",
+    "fix"
+  ].some((term) => text.includes(term))
+    ? "propose"
+    : [
+        "чому",
+        "полам",
+        "не працю",
+        "непрац",
+        "діагност",
+        "diagnos",
+        "розбери"
+      ].some((term) => text.includes(term))
+        ? "diagnose"
+        : "inspect";
+
+  const task = raw
+    .replace(/[<>{}\[\]]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 700);
+  return task.length >= 2 ? { mode, task, origin: "direct_user_request" } : null;
+}
+
 async function notifyTelegramCodeAgentResult(telegram = {}, result = null, error = null) {
   const botConfig = telegramBotsByKey.get(telegram.botKey || "spud");
   if (!botConfig || !telegram.chatId) return;
@@ -5537,6 +5620,7 @@ app.get("/api/health", (_req, res) => {
       telegramImageMaxCount: TELEGRAM_IMAGE_MAX_COUNT,
       telegramImageMaxBytes: TELEGRAM_IMAGE_MAX_BYTES,
       spudCodeAgentWorkerQueue: true,
+      spudDirectCodeAgentRequests: true,
       spudCodeAgentJobTable: SPUD_CODE_AGENT_JOB_TABLE,
       spudDirectGithubAgent: true,
       spudDirectGithubAgentConfigured: isGithubAgentConfigured(),
@@ -6183,11 +6267,16 @@ async function generateChatReply({
   }
 
   const rememberDirective = extractRememberDirective(reply, triggerCatalog);
-  const codeAgentRequest = allowPrivate ? extractCodeAgentRequest(reply) : null;
+  const taggedCodeAgentRequest = allowPrivate ? extractCodeAgentRequest(reply) : null;
+  const directCodeAgentRequest = taggedCodeAgentRequest
+    ? null
+    : inferDirectSpudCodeAgentRequest(userMessage, modelConfig, { allowPrivate, source });
+  const codeAgentRequest = taggedCodeAgentRequest || directCodeAgentRequest;
   const codeAgentQueued = codeAgentRequest
     ? await enqueueSpudCodeAgentJob({ request: codeAgentRequest, modelConfig, userMessage, telegram })
     : null;
   debugInfo.codeAgentRequest = codeAgentRequest;
+  debugInfo.codeAgentRequestSource = taggedCodeAgentRequest ? "model_tag" : directCodeAgentRequest ? "direct_user_request" : "none";
   debugInfo.codeAgentQueued = Boolean(codeAgentQueued);
   let remember = rememberDirective.remember;
   debugInfo.remember = remember;
@@ -6211,6 +6300,12 @@ async function generateChatReply({
   }
 
   reply = cleanProtocolTags(reply);
+  if (directCodeAgentRequest && codeAgentQueued?.id) {
+    reply = [
+      reply,
+      `\n\nЯ поставив code-worker задачу #${codeAgentQueued.id} (${directCodeAgentRequest.mode}). Окремим повідомленням поверну фактичний результат із коду/логів.`
+    ].filter(Boolean).join("");
+  }
 
   if (!remember && shouldAutoRemember({ activeTriggerId, memoryBlock, requestedTrigger })) {
     remember = true;
