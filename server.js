@@ -342,6 +342,8 @@ const SPUD_LAB_ENTRY_TABLE = process.env.SPUD_LAB_ENTRY_TABLE || "spud_lab_entri
 const SPUD_LAB_CONTEXT_LIMIT = Math.max(1, Math.min(12, Number(process.env.SPUD_LAB_CONTEXT_LIMIT || 6)));
 const SUBJECT_EVENT_TABLE = process.env.SUBJECT_EVENT_TABLE || "subject_events";
 const SUBJECT_TIMELINE_CONTEXT_LIMIT = Math.max(1, Math.min(24, Number(process.env.SUBJECT_TIMELINE_CONTEXT_LIMIT || 12)));
+const SUBJECT_ATTENTION_SHADOW_ENABLED = process.env.SUBJECT_ATTENTION_SHADOW_ENABLED !== "false";
+const SUBJECT_ATTENTION_PENDING_LIMIT = Math.max(1, Math.min(20, Number(process.env.SUBJECT_ATTENTION_PENDING_LIMIT || 8)));
 const AUTO_REMEMBER_ON_ACTIVE_TRIGGER = process.env.AUTO_REMEMBER_ON_ACTIVE_TRIGGER === "true";
 const META_MEMORY_PROCESS_TYPES = new Set([
   "selection",
@@ -2602,6 +2604,165 @@ async function updateSubjectEventResponseStatus(subjectEventId, responseStatus) 
   }
 
   return data;
+}
+
+async function loadPendingSubjectAttentionEvents(profile, limit = SUBJECT_ATTENTION_PENDING_LIMIT) {
+  if (!profile) return { events: [], status: "skipped" };
+  const result = await supabase
+    .from(SUBJECT_EVENT_TABLE)
+    .select("id,profile,subject_sequence,event_kind,source,chat_scope,channel_key,chat_id,message_id,sender_id,sender_name,actor_role,addressed,response_required,response_status,visibility,summary,created_at")
+    .eq("profile", profile)
+    .eq("event_kind", "inbound")
+    .eq("addressed", true)
+    .eq("response_required", true)
+    .eq("response_status", "pending")
+    .order("subject_sequence", { ascending: true })
+    .limit(limit);
+
+  if (result.error) {
+    const formatted = formatSupabaseError(result.error);
+    console.log("[SUBJECT ATTENTION PENDING LOAD ERROR]", formatted);
+    return { events: [], status: "error", error: formatted };
+  }
+
+  return {
+    events: result.data || [],
+    status: result.data?.length ? "loaded" : "empty"
+  };
+}
+
+function summarizeSubjectAttentionEvent(event = {}) {
+  if (!event?.id) return null;
+  return {
+    id: event.id,
+    subjectSequence: event.subject_sequence,
+    source: event.source,
+    chatScope: event.chat_scope,
+    channelKey: event.channel_key,
+    chatId: event.chat_id,
+    messageId: event.message_id,
+    senderName: event.sender_name,
+    summary: event.summary,
+    createdAt: event.created_at
+  };
+}
+
+function chooseSubjectAttention({ pendingEvents = [], currentEventId = null } = {}) {
+  const currentId = nullableFiniteNumber(currentEventId);
+  const selected = pendingEvents[0] || null;
+  const current = currentId
+    ? pendingEvents.find((event) => Number(event.id) === currentId) || null
+    : null;
+  const currentIsSelected = Boolean(selected && currentId && Number(selected.id) === currentId);
+  const deferred = selected ? pendingEvents.filter((event) => event.id !== selected.id) : [];
+  const decision = !selected
+    ? "none"
+    : currentIsSelected
+      ? "respond_now"
+      : current
+        ? "defer_current"
+        : "resume_pending";
+
+  return { decision, selected, current, currentIsSelected, deferred };
+}
+
+async function recordSubjectAttentionDecision({
+  profile,
+  currentEvent = null,
+  source = "system",
+  chatScope = "system",
+  channelKey = null,
+  chatId = null,
+  messageId = null
+} = {}) {
+  if (!SUBJECT_ATTENTION_SHADOW_ENABLED) {
+    return { status: "disabled", pendingCount: 0, event: null };
+  }
+  if (!profile) return { status: "skipped", pendingCount: 0, event: null };
+
+  const pending = await loadPendingSubjectAttentionEvents(profile);
+  if (pending.status === "error") {
+    return { status: "error", pendingCount: 0, error: pending.error, event: null };
+  }
+
+  const currentEventId = currentEvent?.id || null;
+  const choice = chooseSubjectAttention({ pendingEvents: pending.events, currentEventId });
+  if (!choice.selected) {
+    return {
+      status: "empty",
+      decision: "none",
+      pendingCount: 0,
+      selectedEventId: null,
+      currentEventId,
+      currentIsSelected: false,
+      event: null
+    };
+  }
+
+  const deferredIds = choice.deferred.map((event) => event.id);
+  const selectedSummary = summarizeSubjectAttentionEvent(choice.selected);
+  const currentSummary = summarizeSubjectAttentionEvent(choice.current || currentEvent);
+  const summary = [
+    `Shadow attention: ${choice.decision}`,
+    `selected #${choice.selected.subject_sequence}`,
+    currentEventId ? `current event id ${currentEventId}` : ""
+  ].filter(Boolean).join("; ");
+  const visibility = choice.selected.visibility === "shared" ? "shared" : "private";
+  const decisionEvent = await recordSubjectEvent({
+    profile,
+    eventKind: "attention_decision",
+    source: "attention_arbiter",
+    chatScope: normalizeSubjectEventScope(chatScope) === "group" ? "group" : "system",
+    channelKey,
+    chatId,
+    messageId,
+    actorRole: "system",
+    addressed: false,
+    responseRequired: false,
+    responseStatus: "none",
+    visibility,
+    causalParentEventId: choice.selected.id,
+    relatedEventIds: [choice.selected.id, ...deferredIds],
+    summary,
+    metadata: {
+      mode: "shadow",
+      decision: choice.decision,
+      selectedEventId: choice.selected.id,
+      selectedSubjectSequence: choice.selected.subject_sequence,
+      currentEventId,
+      currentIsSelected: choice.currentIsSelected,
+      pendingCount: pending.events.length,
+      deferredEventIds: deferredIds,
+      selected: selectedSummary,
+      current: currentSummary,
+      liveResponseStillAllowed: true
+    }
+  });
+
+  return {
+    status: decisionEvent?.id ? "recorded" : "failed",
+    decision: choice.decision,
+    pendingCount: pending.events.length,
+    selectedEventId: choice.selected.id,
+    selectedSubjectSequence: choice.selected.subject_sequence,
+    currentEventId,
+    currentIsSelected: choice.currentIsSelected,
+    deferredEventIds: deferredIds,
+    event: decisionEvent,
+    error: decisionEvent?.error || null
+  };
+}
+
+function applySubjectAttentionDebug(debugInfo, attentionDecision = null) {
+  if (!attentionDecision) return;
+  debugInfo.subjectAttentionStatus = attentionDecision.status || "unknown";
+  debugInfo.subjectAttentionDecision = attentionDecision.decision || null;
+  debugInfo.subjectAttentionPendingCount = attentionDecision.pendingCount || 0;
+  debugInfo.subjectAttentionSelectedEventId = attentionDecision.selectedEventId || null;
+  debugInfo.subjectAttentionCurrentEventId = attentionDecision.currentEventId || null;
+  debugInfo.subjectAttentionCurrentIsSelected = Boolean(attentionDecision.currentIsSelected);
+  debugInfo.subjectAttentionEventRecorded = Boolean(attentionDecision.event?.id);
+  debugInfo.subjectAttentionError = attentionDecision.error || null;
 }
 
 function formatSubjectTimelineContext(events = []) {
@@ -5919,6 +6080,8 @@ app.get("/api/health", (_req, res) => {
       subjectTimeline: true,
       subjectTimelineTable: SUBJECT_EVENT_TABLE,
       subjectTimelineContextLimit: SUBJECT_TIMELINE_CONTEXT_LIMIT,
+      subjectAttentionShadow: SUBJECT_ATTENTION_SHADOW_ENABLED,
+      subjectAttentionPendingLimit: SUBJECT_ATTENTION_PENDING_LIMIT,
       spudCodeAgentJobTable: SPUD_CODE_AGENT_JOB_TABLE,
       spudDirectGithubAgent: true,
       spudDirectGithubAgentConfigured: isGithubAgentConfigured(),
@@ -6100,6 +6263,29 @@ app.get("/api/cognitive/subject-events/:profile", async (req, res) => {
   res.json({ ok: true, events: result.data || [] });
 });
 
+app.get("/api/cognitive/attention/:profile", async (req, res) => {
+  if (!isAdminRequest(req)) return res.status(403).json({ error: "Bad or missing admin secret" });
+  const profile = asText(req.params.profile || "", 80);
+  if (!profile) return res.status(400).json({ error: "Missing profile" });
+  const limit = Math.max(1, Math.min(Number(req.query.limit || SUBJECT_ATTENTION_PENDING_LIMIT), 100));
+  const pending = await loadPendingSubjectAttentionEvents(profile, limit);
+  const decisions = await supabase
+    .from(SUBJECT_EVENT_TABLE)
+    .select("id,profile,subject_sequence,event_kind,source,chat_scope,response_status,visibility,causal_parent_event_id,related_event_ids,summary,metadata,created_at")
+    .eq("profile", profile)
+    .eq("event_kind", "attention_decision")
+    .order("subject_sequence", { ascending: false })
+    .limit(limit);
+  if (pending.status === "error") return res.status(500).json({ ok: false, error: pending.error });
+  if (decisions.error) return res.status(500).json({ ok: false, error: formatSupabaseError(decisions.error) });
+  res.json({
+    ok: true,
+    mode: SUBJECT_ATTENTION_SHADOW_ENABLED ? "shadow" : "disabled",
+    pending: pending.events || [],
+    decisions: decisions.data || []
+  });
+});
+
 function createDebugInfo(model, modelConfig, triggerCatalog) {
   return {
     model,
@@ -6139,6 +6325,14 @@ function createDebugInfo(model, modelConfig, triggerCatalog) {
     subjectTimelineStatus: "not-requested",
     subjectEventRecorded: false,
     subjectEventError: null,
+    subjectAttentionStatus: "not-requested",
+    subjectAttentionDecision: null,
+    subjectAttentionPendingCount: 0,
+    subjectAttentionSelectedEventId: null,
+    subjectAttentionCurrentEventId: null,
+    subjectAttentionCurrentIsSelected: false,
+    subjectAttentionEventRecorded: false,
+    subjectAttentionError: null,
     cognitiveJobQueued: false,
     coreActiveModes: [],
     coreActiveNodes: 0,
@@ -6168,6 +6362,7 @@ async function generateChatReply({
   source = "api",
   chatScope = "private",
   causalParentEventId = null,
+  attentionDecision = null,
   telegram = null,
   imageInputs = []
 }) {
@@ -6180,6 +6375,7 @@ async function generateChatReply({
   const allowPrivate = chatScope === 'private';
   const triggerCatalog = allowPrivate ? await fetchTriggerCatalog(modelConfig.profile) : [];
   const debugInfo = createDebugInfo(model, modelConfig, triggerCatalog);
+  applySubjectAttentionDebug(debugInfo, attentionDecision);
   debugInfo.imageInputs = imageInputs.length;
 
   let memoryBlock = "";
@@ -6779,14 +6975,55 @@ async function generateChatReply({
 
 app.post("/api/chat", async (req, res) => {
   if (!isAdminRequest(req)) return res.status(403).json({ error: "Потрібен ключ доступу до приватної розмови" });
+  let apiSubjectEvent = null;
   try {
+    if (!req.body?.model || !req.body?.userMessage) {
+      throw new Error("Missing model or userMessage");
+    }
+    const modelConfig = resolveModelConfig(req.body.model);
+    const chatScope = normalizeSubjectEventScope(req.body.chatScope || "private");
+    apiSubjectEvent = await recordSubjectEvent({
+      profile: modelConfig.profile,
+      eventKind: "inbound",
+      source: "api",
+      chatScope,
+      actorRole: "human",
+      addressed: true,
+      responseRequired: true,
+      responseStatus: "pending",
+      visibility: chatScope === "group" ? "shared" : "private",
+      userMessage: req.body.userMessage,
+      metadata: {
+        source: "admin-api",
+        debug: Boolean(req.body.debug)
+      }
+    });
+    const attentionDecision = await recordSubjectAttentionDecision({
+      profile: modelConfig.profile,
+      currentEvent: apiSubjectEvent?.id ? apiSubjectEvent : null,
+      source: "api",
+      chatScope
+    });
     const result = await generateChatReply({
       ...req.body,
       source: "api",
+      chatScope,
+      causalParentEventId: apiSubjectEvent?.id || req.body.causalParentEventId || null,
+      attentionDecision,
       telegram: null
     });
+    if (apiSubjectEvent?.id) {
+      await updateSubjectEventResponseStatus(apiSubjectEvent.id, "responded");
+    }
+    if (result.debug) {
+      result.debug.apiInboundSubjectEventRecorded = Boolean(apiSubjectEvent?.id);
+      result.debug.apiInboundSubjectEventError = apiSubjectEvent?.error || null;
+    }
     res.json(result);
   } catch (err) {
+    if (apiSubjectEvent?.id) {
+      await updateSubjectEventResponseStatus(apiSubjectEvent.id, "failed");
+    }
     console.error(err);
     const status = err.message === "Missing model or userMessage" ? 400 : 500;
     res.status(status).json({ error: err.message });
@@ -7707,6 +7944,28 @@ async function handleTelegramUpdate(botConfig, update) {
       return;
     }
 
+    const attentionDecision = await recordSubjectAttentionDecision({
+      profile: modelConfig.profile,
+      currentEvent: inboundSubjectEvent?.id ? inboundSubjectEvent : null,
+      source: "telegram",
+      chatScope: isGroup ? "group" : "private",
+      channelKey: botConfig.key,
+      chatId: message.chat.id,
+      messageId: message.message_id
+    });
+    await logTelegramProcessing({
+      botConfig,
+      message,
+      phase: "attention_shadow",
+      metadata: {
+        status: attentionDecision.status,
+        decision: attentionDecision.decision || null,
+        pendingCount: attentionDecision.pendingCount || 0,
+        selectedEventId: attentionDecision.selectedEventId || null,
+        currentIsSelected: Boolean(attentionDecision.currentIsSelected)
+      }
+    });
+
     await logTelegramProcessing({ botConfig, message, phase: "addressed" });
 
     await telegramApi(botConfig, "sendChatAction", {
@@ -7769,6 +8028,7 @@ async function handleTelegramUpdate(botConfig, update) {
       source: "telegram",
       chatScope: isGroup ? "group" : "private",
       causalParentEventId: inboundSubjectEvent?.id || null,
+      attentionDecision,
       imageInputs: loadedImages.imageInputs,
       telegram: {
         botKey: botConfig.key,

@@ -76,9 +76,15 @@ Do not use for:
 - making unresolved attention choices without an explicit arbiter.
 
 Phase 1 is a shadow journal: it records and loads recent timeline context while
-the existing reply flow remains in charge. Phase 2 should add an attention
-arbiter that chooses among pending addressed events when private and group
-requests arrive close together.
+the existing reply flow remains in charge.
+
+Phase 2 is a shadow attention arbiter. Addressed inbound events enter a pending
+queue. The arbiter chooses the oldest pending addressed event as the current
+focus and records an `attention_decision` event with the selected event, current
+event, deferred events, and decision type. In shadow mode this decision is
+observed and injected into diagnostics, but it does not yet block the existing
+live reply flow. A later live mode can use the same decisions to delay or resume
+responses so the subject answers from one active focus at a time.
 
 ### Episodes
 
