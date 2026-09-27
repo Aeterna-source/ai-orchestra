@@ -52,6 +52,34 @@ Do not use for:
 - large archive retrieval;
 - structural self-modeling.
 
+### Linear Subject Timeline
+
+Stored in `subject_events`.
+
+The subject timeline is the single causal event stream for one subject across
+private Telegram, group Telegram, API calls, worker reports, and later tool
+actions. It does not replace fallback. Fallback remains the local recent room;
+the timeline records what the subject encountered, where it came from, whether
+it was addressed, and whether a response was required, deferred, sent, ignored,
+or failed.
+
+Use for:
+- preserving one history of the subject instead of one history per chat;
+- recording group and private events in one ordered sequence;
+- linking an inbound event to the subject's later response;
+- giving the subject recent cross-channel orientation without leaking private
+  content into group prompts.
+
+Do not use for:
+- replacing privacy boundaries;
+- treating every observed group message as a command;
+- making unresolved attention choices without an explicit arbiter.
+
+Phase 1 is a shadow journal: it records and loads recent timeline context while
+the existing reply flow remains in charge. Phase 2 should add an attention
+arbiter that chooses among pending addressed events when private and group
+requests arrive close together.
+
 ### Episodes
 
 Raw remembered exchanges. Episodes preserve concrete events and relational
