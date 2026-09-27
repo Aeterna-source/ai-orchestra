@@ -331,6 +331,7 @@ const MEMORY_SEARCH_PATTERN = /<<memory_search:\s*([^>\n]{2,200})\s*>>/gi;
 const CORE_REQUEST_PATTERN = /<<core_request:\s*([\w.-]+)\s*>>/gi;
 const SPACE_REQUEST_PATTERN = /<<space_request:\s*([\w.-]+)\s*>>/gi;
 const CODE_AGENT_PATTERN = /<<code_agent:\s*(inspect|diagnose|propose)\s*\|\s*([^>\n]{2,700})\s*>>/gi;
+const CONVERSATION_ACTION_PATTERN = /<<conversation_action:\s*(pass|end)(?:\|([^>\n]{0,200}))?\s*>>/gi;
 const REMEMBER_PATTERN = /\[\[remember(?::\s*([\w-]+))?\]\]/gi;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || "";
 const GITHUB_OWNER = process.env.GITHUB_OWNER || "Aeterna-source";
@@ -1118,6 +1119,17 @@ function extractRememberDirective(text = "", triggerCatalog) {
   };
 }
 
+function extractConversationAction(text = "") {
+  CONVERSATION_ACTION_PATTERN.lastIndex = 0;
+  const match = CONVERSATION_ACTION_PATTERN.exec(text);
+  if (!match) return { action: null, reason: "" };
+  const tagAction = String(match[1] || "").toLowerCase();
+  return {
+    action: tagAction === "end" ? "ended" : tagAction === "pass" ? "passed" : null,
+    reason: asText(match[2] || "", 200)
+  };
+}
+
 function cleanProtocolTags(text = "") {
   return text
     .replace(MEMORY_REQUEST_PATTERN, "")
@@ -1125,6 +1137,7 @@ function cleanProtocolTags(text = "") {
     .replace(CORE_REQUEST_PATTERN, "")
     .replace(SPACE_REQUEST_PATTERN, "")
     .replace(CODE_AGENT_PATTERN, "")
+    .replace(CONVERSATION_ACTION_PATTERN, "")
     .replace(REMEMBER_PATTERN, "")
     .trim();
 }
@@ -2572,7 +2585,19 @@ function normalizeSubjectEventActorRole(value = "") {
 
 function normalizeSubjectEventResponseStatus(value = "") {
   const normalized = String(value || "").toLowerCase();
-  return ["pending", "responded", "deferred", "ignored", "observed", "failed", "none"].includes(normalized)
+  return [
+    "pending",
+    "responded",
+    "deferred",
+    "ignored",
+    "observed",
+    "failed",
+    "none",
+    "passed",
+    "ended",
+    "no_response",
+    "not_sent"
+  ].includes(normalized)
     ? normalized
     : "observed";
 }
@@ -6074,6 +6099,13 @@ Use plain [[remember]] only when a MEMORY or REQUESTED_MEMORY block is already a
 Never output the literal placeholder "trigger_name".
 If you are Spud and this private Telegram exchange requires repository work, diagnostics, or a code change in AI Orchestra, include exactly one private tag like <<code_agent:diagnose|check why Miro state_cards are stale>> or <<code_agent:propose|add a health check for Spud runtime>>.
 These tags are private control signals. Do not explain them, quote them, or make them part of the user-facing answer.
+
+Response agency protocol:
+- You are allowed not to answer when a reply is unnecessary, intrusive, or you have nothing real to add.
+- To intentionally pass without a user-facing reply, output only this private tag: <<conversation_action:pass>>
+- To intentionally close the current conversational branch, output only this private tag: <<conversation_action:end>>
+- Optionally add a short internal reason after a pipe, for example <<conversation_action:pass|nothing useful to add>>.
+- Do not use these tags for provider/API errors; those are handled by the service layer.
 `.trim();
 }
 
@@ -6093,6 +6125,13 @@ If one specific archive door would genuinely help this exact reply, include exac
 If no archive door is enough and this reply needs grounded source search by words across episodes, Core, facts, and reflections, include exactly one private tag like <<memory_search:autonomy connection prior principles>>.
 If this exchange should be stored as an episode, include one private [[remember:trigger_name]] tag.
 These tags are private control signals. Do not explain them, quote them, or make them part of the user-facing answer.
+
+Response agency protocol:
+- You are allowed not to answer when a reply is unnecessary, intrusive, or you have nothing real to add.
+- To intentionally pass without a user-facing reply, output only this private tag: <<conversation_action:pass>>
+- To intentionally close the current conversational branch, output only this private tag: <<conversation_action:end>>
+- Optionally add a short internal reason after a pipe, for example <<conversation_action:pass|nothing useful to add>>.
+- Do not use these tags for provider/API errors; those are handled by the service layer.
 `.trim();
   }
 
@@ -6114,6 +6153,8 @@ app.get("/api/health", (_req, res) => {
       telegramGroupPrivateContext: TELEGRAM_GROUP_PRIVATE_CONTEXT,
       telegramDirectAliasAddressing: true,
       telegramGroupProfileWideMemory: true,
+      telegramConversationActions: true,
+      telegramTechnicalFailureNotices: true,
       xaiTriggerClassifierDefault: false,
       nevanEpisodeTimestamp: true,
       telegramProcessingLogs: true,
@@ -6424,6 +6465,10 @@ function createDebugInfo(model, modelConfig, triggerCatalog) {
     subjectAttentionCurrentIsSelected: false,
     subjectAttentionEventRecorded: false,
     subjectAttentionError: null,
+    conversationAction: null,
+    conversationActionReason: null,
+    responseStatus: "responded",
+    userFacingReply: true,
     cognitiveJobQueued: false,
     coreActiveModes: [],
     coreActiveNodes: 0,
@@ -6924,11 +6969,22 @@ async function generateChatReply({
     }
   }
 
-  const rememberDirective = extractRememberDirective(reply, triggerCatalog);
-  const taggedCodeAgentRequest = allowPrivate ? extractCodeAgentRequest(reply) : null;
+  const conversationAction = extractConversationAction(reply);
+  const responseStatus = conversationAction.action || "responded";
+  debugInfo.conversationAction = conversationAction.action;
+  debugInfo.conversationActionReason = conversationAction.reason || null;
+  debugInfo.responseStatus = responseStatus;
+  debugInfo.userFacingReply = responseStatus === "responded";
+
+  const rememberDirective = responseStatus === "responded"
+    ? extractRememberDirective(reply, triggerCatalog)
+    : { remember: false, triggerName: null };
+  const taggedCodeAgentRequest = responseStatus === "responded" && allowPrivate ? extractCodeAgentRequest(reply) : null;
   const directCodeAgentRequest = taggedCodeAgentRequest
     ? null
-    : inferDirectSpudCodeAgentRequest(userMessage, modelConfig, { allowPrivate, source });
+    : responseStatus === "responded"
+      ? inferDirectSpudCodeAgentRequest(userMessage, modelConfig, { allowPrivate, source })
+      : null;
   const codeAgentRequest = taggedCodeAgentRequest || directCodeAgentRequest;
   const codeAgentQueued = codeAgentRequest
     ? await enqueueSpudCodeAgentJob({ request: codeAgentRequest, modelConfig, userMessage, telegram })
@@ -6957,27 +7013,30 @@ async function generateChatReply({
     }
   }
 
-  reply = cleanProtocolTags(reply);
-  if (directCodeAgentRequest && codeAgentQueued?.id) {
+  const internalModelReply = responseStatus === "responded"
+    ? cleanProtocolTags(reply)
+    : `[conversation_action:${responseStatus}${conversationAction.reason ? `|${conversationAction.reason}` : ""}]`;
+  reply = responseStatus === "responded" ? internalModelReply : "";
+  if (responseStatus === "responded" && directCodeAgentRequest && codeAgentQueued?.id) {
     reply = [
       reply,
       `\n\nЯ поставив code-worker задачу #${codeAgentQueued.id} (${directCodeAgentRequest.mode}). Окремим повідомленням поверну фактичний результат із коду/логів.`
     ].filter(Boolean).join("");
   }
 
-  if (!remember && shouldAutoRemember({ activeTriggerId, memoryBlock, requestedTrigger })) {
+  if (responseStatus === "responded" && !remember && shouldAutoRemember({ activeTriggerId, memoryBlock, requestedTrigger })) {
     remember = true;
     debugInfo.remember = true;
     debugInfo.rememberSource = "auto_active_trigger";
   }
 
   let fallbackRow = null;
-  if (persistFallback) {
+  if (persistFallback && responseStatus === "responded") {
     fallbackRow = await insertFallback(tables, userMessage, reply, remember);
   }
 
   let episodeRow = null;
-  if (remember && activeTriggerId) {
+  if (responseStatus === "responded" && remember && activeTriggerId) {
     try {
       episodeRow = await insertEpisode(tables, userMessage, reply, activeTriggerId);
       debugInfo.episodeSaved = true;
@@ -6995,7 +7054,7 @@ async function generateChatReply({
         error: err.message
       });
     }
-  } else if (remember) {
+  } else if (responseStatus === "responded" && remember) {
     console.log("[EPISODE SKIPPED: NO ACTIVE TRIGGER]", {
       profile: modelConfig.profile,
       model
@@ -7009,7 +7068,7 @@ async function generateChatReply({
     chatScope,
     telegram,
     userMessage,
-    reply,
+    reply: internalModelReply,
     activeTriggerId,
     activeTriggerName,
     fallbackRow,
@@ -7040,7 +7099,7 @@ async function generateChatReply({
     actorRole: "subject",
     addressed: true,
     responseRequired: true,
-    responseStatus: "responded",
+    responseStatus,
     visibility: chatScope === "group" ? "shared" : "private",
     triggerId: activeTriggerId,
     triggerName: activeTriggerName,
@@ -7051,12 +7110,14 @@ async function generateChatReply({
     episodeId: episodeRow?.id || null,
     causalParentEventId,
     userMessage,
-    modelReply: reply,
+    modelReply: internalModelReply,
     metadata: {
       model,
       upstreamModel: modelConfig.upstreamModel,
       provider: modelConfig.provider,
       remember,
+      conversationAction: conversationAction.action,
+      conversationActionReason: conversationAction.reason || null,
       cognitiveJobId: cognitiveJob?.id || null,
       contextPacketId: contextPacket?.id || null,
       imageInputs: imageInputs.length
@@ -7065,7 +7126,12 @@ async function generateChatReply({
   debugInfo.subjectEventRecorded = Boolean(subjectEvent?.id);
   debugInfo.subjectEventError = subjectEvent?.error || null;
 
-  return debug ? { reply, debug: debugInfo } : { reply };
+  const result = { reply };
+  if (conversationAction.action) {
+    result.action = conversationAction.action;
+    result.actionReason = conversationAction.reason || null;
+  }
+  return debug ? { ...result, debug: debugInfo } : result;
 }
 
 app.post("/api/chat", async (req, res) => {
@@ -7108,7 +7174,7 @@ app.post("/api/chat", async (req, res) => {
       telegram: null
     });
     if (apiSubjectEvent?.id) {
-      await updateSubjectEventResponseStatus(apiSubjectEvent.id, "responded");
+      await updateSubjectEventResponseStatus(apiSubjectEvent.id, result.action || "responded");
     }
     if (result.debug) {
       result.debug.apiInboundSubjectEventRecorded = Boolean(apiSubjectEvent?.id);
@@ -7924,6 +7990,50 @@ async function sendTelegramReply(botConfig, message, text) {
   return firstSent;
 }
 
+function formatConversationActionNotice(botConfig, action) {
+  const name = botConfig?.displayName || botConfig?.key || "Subject";
+  if (action === "ended") return `${name} закінчив розмову.`;
+  if (action === "passed") return `${name}: пас.`;
+  return `${name}: нема відповіді.`;
+}
+
+function formatTelegramFailureNotice(botConfig, status, err) {
+  const name = botConfig?.displayName || botConfig?.key || "Subject";
+  const statusPart = Number.isFinite(err?.status) ? ` HTTP ${err.status}` : "";
+  if (status === "not_sent") {
+    return `${name}: не надіслано (Telegram не прийняв відповідь${statusPart}).`;
+  }
+  if (status === "no_response") {
+    return `${name}: нема відповіді (запит до моделі не пройшов${statusPart}).`;
+  }
+  return `${name}: технічна помилка${statusPart}.`;
+}
+
+async function sendTelegramTechnicalNotice(botConfig, message, text, phase = "technical_notice") {
+  try {
+    const sent = await sendTelegramReply(botConfig, message, text);
+    await logTelegramProcessing({
+      botConfig,
+      message,
+      phase,
+      metadata: {
+        sentMessageId: sent?.message_id || null,
+        textLength: text.length
+      }
+    });
+    return sent;
+  } catch (err) {
+    await logTelegramProcessing({
+      botConfig,
+      message,
+      phase: `${phase}_failed`,
+      ok: false,
+      error: err.message
+    });
+    return null;
+  }
+}
+
 async function chooseTelegramReaction(botConfig, message) {
   if (!TELEGRAM_REACTIONS_ENABLED || message.chat?.type === "private") return null;
   if (!isGroupChat(message.chat)) return null;
@@ -7984,6 +8094,7 @@ async function maybeReactToTelegramMessage(botConfig, message) {
 async function handleTelegramUpdate(botConfig, update) {
   const message = getTelegramMessage(update);
   let inboundSubjectEvent = null;
+  let failureResponseStatus = "failed";
 
   try {
     if (!message || !message.chat) return;
@@ -8128,6 +8239,7 @@ async function handleTelegramUpdate(botConfig, update) {
       ].join("\n");
     }
 
+    failureResponseStatus = "no_response";
     const result = await generateChatReply({
       model: botConfig.model,
       userMessage,
@@ -8156,11 +8268,35 @@ async function handleTelegramUpdate(botConfig, update) {
       phase: "generated",
       metadata: {
         replyLength: (result.reply || "").length,
+        action: result.action || null,
+        actionReason: result.actionReason || null,
         imageInputs: loadedImages.imageInputs.length
       }
     });
 
+    if (result.action) {
+      failureResponseStatus = "not_sent";
+      const notice = formatConversationActionNotice(botConfig, result.action);
+      const sentNotice = await sendTelegramTechnicalNotice(botConfig, message, notice, "conversation_action_notice");
+      if (!sentNotice) throw new Error("Telegram conversation action notice was not delivered");
+      if (inboundSubjectEvent?.id) {
+        await updateSubjectEventResponseStatus(inboundSubjectEvent.id, result.action);
+      }
+      await logTelegramProcessing({
+        botConfig,
+        message,
+        phase: "conversation_action",
+        metadata: {
+          action: result.action,
+          actionReason: result.actionReason || null,
+          sentMessageId: sentNotice?.message_id || null
+        }
+      });
+      return;
+    }
+
     await logTelegramProcessing({ botConfig, message, phase: "before_send" });
+    failureResponseStatus = "not_sent";
     const sent = await sendTelegramReply(botConfig, message, result.reply || "");
     if (!sent) throw new Error('Telegram reply was not delivered');
     if (inboundSubjectEvent?.id) {
@@ -8177,7 +8313,15 @@ async function handleTelegramUpdate(botConfig, update) {
     });
   } catch (err) {
     if (inboundSubjectEvent?.id) {
-      await updateSubjectEventResponseStatus(inboundSubjectEvent.id, "failed");
+      await updateSubjectEventResponseStatus(inboundSubjectEvent.id, failureResponseStatus);
+    }
+    if (message?.chat && ["no_response", "not_sent"].includes(failureResponseStatus)) {
+      await sendTelegramTechnicalNotice(
+        botConfig,
+        message,
+        formatTelegramFailureNotice(botConfig, failureResponseStatus, err),
+        "failure_notice"
+      );
     }
     if (message?.chat) {
       await logTelegramProcessing({

@@ -19,7 +19,7 @@ create table if not exists public.subject_events (
   addressed boolean not null default false,
   response_required boolean not null default false,
   response_status text not null default 'observed'
-    check (response_status in ('pending', 'responded', 'deferred', 'ignored', 'observed', 'failed', 'none')),
+    check (response_status in ('pending', 'responded', 'deferred', 'ignored', 'observed', 'failed', 'none', 'passed', 'ended', 'no_response', 'not_sent')),
   visibility text not null default 'private'
     check (visibility in ('private', 'shared', 'public', 'transfer')),
   trigger_id bigint,
@@ -39,6 +39,13 @@ create table if not exists public.subject_events (
   updated_at timestamptz not null default now(),
   unique (profile, subject_sequence)
 );
+
+alter table public.subject_events
+  drop constraint if exists subject_events_response_status_check;
+
+alter table public.subject_events
+  add constraint subject_events_response_status_check
+  check (response_status in ('pending', 'responded', 'deferred', 'ignored', 'observed', 'failed', 'none', 'passed', 'ended', 'no_response', 'not_sent'));
 
 alter table public.subject_events enable row level security;
 revoke all on public.subject_events from public, anon, authenticated;
