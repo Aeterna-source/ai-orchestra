@@ -63,3 +63,5 @@ create index if not exists subject_events_parent_idx
 
 create index if not exists subject_events_os_event_idx
   on public.subject_events(os_event_id);
+
+notify pgrst, 'reload schema';
