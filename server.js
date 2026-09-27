@@ -2569,8 +2569,9 @@ async function recordSubjectEvent({
     .single();
 
   if (error) {
-    console.log("[SUBJECT EVENT INSERT ERROR]", formatSupabaseError(error));
-    return null;
+    const formatted = formatSupabaseError(error);
+    console.log("[SUBJECT EVENT INSERT ERROR]", formatted);
+    return { error: formatted };
   }
 
   return data;
@@ -6131,6 +6132,7 @@ function createDebugInfo(model, modelConfig, triggerCatalog) {
     subjectTimelineEvents: 0,
     subjectTimelineStatus: "not-requested",
     subjectEventRecorded: false,
+    subjectEventError: null,
     cognitiveJobQueued: false,
     coreActiveModes: [],
     coreActiveNodes: 0,
@@ -6763,7 +6765,8 @@ async function generateChatReply({
       imageInputs: imageInputs.length
     }
   });
-  debugInfo.subjectEventRecorded = Boolean(subjectEvent);
+  debugInfo.subjectEventRecorded = Boolean(subjectEvent?.id);
+  debugInfo.subjectEventError = subjectEvent?.error || null;
 
   return debug ? { reply, debug: debugInfo } : { reply };
 }
