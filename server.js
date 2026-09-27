@@ -313,6 +313,7 @@ const TELEGRAM_MESSAGE_CHUNK_SIZE = Number(process.env.TELEGRAM_MESSAGE_CHUNK_SI
 const TELEGRAM_API_RETRY_ATTEMPTS = Number(process.env.TELEGRAM_API_RETRY_ATTEMPTS || 3);
 const TELEGRAM_API_RETRY_DELAY_MS = Number(process.env.TELEGRAM_API_RETRY_DELAY_MS || 600);
 const TELEGRAM_GROUP_REPLY_TO_MESSAGE = process.env.TELEGRAM_GROUP_REPLY_TO_MESSAGE === "true";
+const TELEGRAM_GROUP_PRIVATE_CONTEXT = process.env.TELEGRAM_GROUP_PRIVATE_CONTEXT !== "false";
 const TELEGRAM_IMAGE_MAX_COUNT = Math.max(1, Math.min(4, Number(process.env.TELEGRAM_IMAGE_MAX_COUNT || 1)));
 const TELEGRAM_IMAGE_MAX_BYTES = Number(process.env.TELEGRAM_IMAGE_MAX_BYTES || 4 * 1024 * 1024);
 const telegramReactionLastUsed = new Map();
@@ -6107,6 +6108,7 @@ app.get("/api/health", (_req, res) => {
       telegramDeliveryLogs: true,
       telegramApiRetries: true,
       telegramGroupReplyQuote: TELEGRAM_GROUP_REPLY_TO_MESSAGE,
+      telegramGroupPrivateContext: TELEGRAM_GROUP_PRIVATE_CONTEXT,
       telegramDirectAliasAddressing: true,
       xaiTriggerClassifierDefault: false,
       nevanEpisodeTimestamp: true,
@@ -6448,6 +6450,7 @@ async function generateChatReply({
   chatScope = "private",
   causalParentEventId = null,
   attentionDecision = null,
+  allowPrivateContext = false,
   telegram = null,
   imageInputs = []
 }) {
@@ -6457,7 +6460,7 @@ async function generateChatReply({
 
   const modelConfig = resolveModelConfig(model);
   const tables = memoryTables[modelConfig.profile];
-  const allowPrivate = chatScope === 'private';
+  const allowPrivate = chatScope === 'private' || Boolean(allowPrivateContext);
   const triggerCatalog = allowPrivate ? await fetchTriggerCatalog(modelConfig.profile) : [];
   const debugInfo = createDebugInfo(model, modelConfig, triggerCatalog);
   applySubjectAttentionDebug(debugInfo, attentionDecision);
@@ -8010,6 +8013,7 @@ async function handleTelegramUpdate(botConfig, update) {
     }
 
     const isGroup = isGroupChat(message.chat);
+    const usePrivateContext = isGroup && TELEGRAM_GROUP_PRIVATE_CONTEXT;
     const isAddressed = addressedToBot(message, botConfig);
     inboundSubjectEvent = await recordSubjectEvent({
       profile: modelConfig.profile,
@@ -8121,13 +8125,14 @@ async function handleTelegramUpdate(botConfig, update) {
       model: botConfig.model,
       userMessage,
       debug: false,
-      fallbackHistoryOverride: isGroup ? [] : null,
+      fallbackHistoryOverride: isGroup && !usePrivateContext ? [] : null,
       conversationContextPrompt: groupContext,
-      persistFallback: !isGroup,
+      persistFallback: !isGroup || usePrivateContext,
       source: "telegram",
       chatScope: isGroup ? "group" : "private",
       causalParentEventId: inboundSubjectEvent?.id || null,
       attentionDecision,
+      allowPrivateContext: usePrivateContext,
       imageInputs: loadedImages.imageInputs,
       telegram: {
         botKey: botConfig.key,
