@@ -2501,6 +2501,12 @@ function summarizeSubjectEvent({ userMessage = "", modelReply = "", fallback = "
   return truncateText(userMessage || modelReply || fallback, 420);
 }
 
+function nullableFiniteNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
 async function recordSubjectEvent({
   profile,
   eventKind = "inbound",
@@ -2547,14 +2553,14 @@ async function recordSubjectEvent({
     response_required: Boolean(responseRequired),
     response_status: normalizeSubjectEventResponseStatus(responseStatus),
     visibility: normalizeSubjectEventVisibility(visibility, normalizedScope),
-    trigger_id: Number.isFinite(Number(triggerId)) ? Number(triggerId) : null,
+    trigger_id: nullableFiniteNumber(triggerId),
     trigger_name: asText(triggerName, 120) || null,
-    os_event_id: Number.isFinite(Number(osEventId)) ? Number(osEventId) : null,
+    os_event_id: nullableFiniteNumber(osEventId),
     fallback_table: asText(fallbackTable, 120) || null,
-    fallback_row_id: Number.isFinite(Number(fallbackRowId)) ? Number(fallbackRowId) : null,
+    fallback_row_id: nullableFiniteNumber(fallbackRowId),
     episode_table: asText(episodeTable, 120) || null,
-    episode_id: Number.isFinite(Number(episodeId)) ? Number(episodeId) : null,
-    causal_parent_event_id: Number.isFinite(Number(causalParentEventId)) ? Number(causalParentEventId) : null,
+    episode_id: nullableFiniteNumber(episodeId),
+    causal_parent_event_id: nullableFiniteNumber(causalParentEventId),
     related_event_ids: asArray(relatedEventIds).map(Number).filter(Number.isFinite).slice(0, 12),
     user_message: asMultilineText(userMessage, 12000) || null,
     model_reply: asMultilineText(modelReply, 12000) || null,
