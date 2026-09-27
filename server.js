@@ -312,6 +312,7 @@ const TELEGRAM_REACTION_COOLDOWN_MS = Number(process.env.TELEGRAM_REACTION_COOLD
 const TELEGRAM_MESSAGE_CHUNK_SIZE = Number(process.env.TELEGRAM_MESSAGE_CHUNK_SIZE || 3200);
 const TELEGRAM_API_RETRY_ATTEMPTS = Number(process.env.TELEGRAM_API_RETRY_ATTEMPTS || 3);
 const TELEGRAM_API_RETRY_DELAY_MS = Number(process.env.TELEGRAM_API_RETRY_DELAY_MS || 600);
+const TELEGRAM_GROUP_REPLY_TO_MESSAGE = process.env.TELEGRAM_GROUP_REPLY_TO_MESSAGE === "true";
 const TELEGRAM_IMAGE_MAX_COUNT = Math.max(1, Math.min(4, Number(process.env.TELEGRAM_IMAGE_MAX_COUNT || 1)));
 const TELEGRAM_IMAGE_MAX_BYTES = Number(process.env.TELEGRAM_IMAGE_MAX_BYTES || 4 * 1024 * 1024);
 const telegramReactionLastUsed = new Map();
@@ -6025,6 +6026,7 @@ app.get("/api/health", (_req, res) => {
       sourceMemoryRequestLoop: true,
       telegramDeliveryLogs: true,
       telegramApiRetries: true,
+      telegramGroupReplyQuote: TELEGRAM_GROUP_REPLY_TO_MESSAGE,
       xaiTriggerClassifierDefault: false,
       nevanEpisodeTimestamp: true,
       telegramProcessingLogs: true,
@@ -7785,7 +7787,7 @@ async function sendTelegramReply(botConfig, message, text) {
       disable_web_page_preview: true
     };
 
-    if (isGroupChat(message.chat) && index === 0) {
+    if (TELEGRAM_GROUP_REPLY_TO_MESSAGE && isGroupChat(message.chat) && index === 0) {
       body.reply_to_message_id = message.message_id;
       body.allow_sending_without_reply = true;
     }
