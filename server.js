@@ -11,6 +11,11 @@ import { requestManifest } from "./lib/request-manifest.js";
 import { validInterpretation } from "./lib/interpretation-schema.js";
 import { durableDatabase } from "./lib/durable-db.js";
 import { receiveUpdate, drainUpdates } from "./lib/telegram-inbox.js";
+import { providerCapabilities } from './lib/provider-capabilities.js';
+import { compileContext } from './lib/context-compiler.js';
+import { structuredResult } from './lib/structured-result.js';
+import { runtimeEvidence, synthesizeRuntimeIdentity, runtimeIdentityPrompt } from './lib/runtime-identity.js';
+import { runtimeTurns } from './lib/runtime-turn.js';
 
 dotenv.config();
 
@@ -37,6 +42,8 @@ const rawSupabase = createClient(
 );
 
 const { db: supabase, run: runDurable } = durableDatabase(rawSupabase);
+const runtimeContinuity = runtimeTurns(rawSupabase, { enabled: process.env.RUNTIME_IDENTITY_ENABLED === 'true' });
+const CONTEXT_COMPILER_ENABLED = process.env.CONTEXT_COMPILER_ENABLED === 'true';
 const DEFAULT_RESPONSE_TOKEN_LIMIT = 6000;
 
 function parsePositiveInteger(value, fallback = null) {
@@ -1820,8 +1827,20 @@ async function callChatCompletion({
   extraBody = {},
   purpose = "chat",
   profile = null,
-  forceChatCompletions = false
+  forceChatCompletions = false,
+  contextCompiled = false
 }) {
+  if (!contextCompiled && (purpose === 'chat' || purpose.startsWith('chat_') || purpose.endsWith('_followup'))) {
+    const turn = runtimeContinuity.current();
+    if (CONTEXT_COMPILER_ENABLED) {
+      const compiled = compileContext(messages, providerCapabilities(providerName, model), turn?.state?.context_focus || []);
+      messages = compiled.messages;
+      console.log('[CONTEXT COMPILER]', { profile, purpose, ...compiled.debug });
+      if (turn) Object.assign(turn.debug, { contextCompilerStrategy: compiled.debug.strategy, contextCompiler: compiled.debug });
+    }
+  }
+  // Internal compiler metadata must never reach any provider adapter.
+  messages = messages.map(({ contextBlock, ...message }) => message);
   const provider = providers[providerName];
   if (!provider) {
     throw new Error(`Unknown provider: ${providerName}`);
@@ -1906,7 +1925,8 @@ async function callChatCompletion({
         extraBody,
         purpose: `${purpose}_chat_fallback`,
         profile,
-        forceChatCompletions: true
+        forceChatCompletions: true,
+        contextCompiled: true
       });
     }
 
@@ -1938,6 +1958,16 @@ async function callChatCompletion({
   });
 
   return reply;
+}
+
+async function callStructuredCompletion({ schema = null, validate, ...request }) {
+  const turn = runtimeContinuity.current();
+  const result = await structuredResult({ call: callChatCompletion, request, schema, validate,
+    name: request.purpose, onStatus: status => {
+      if (turn) turn.debug.structuredResults[request.purpose] = status;
+      console.log('[STRUCTURED RESULT]', { purpose: request.purpose, profile: request.profile, ...status });
+    } });
+  return JSON.stringify(result.value);
 }
 
 function isGithubAgentConfigured() {
@@ -2254,7 +2284,9 @@ async function resolveTriggerWithModel({ modelConfig, userMessage, triggerCatalo
   const catalogText = formatTriggerCatalog(triggerCatalog);
 
   try {
-    const raw = await callChatCompletion({
+    const raw = await callStructuredCompletion({
+      schema: { type: 'object', properties: { trigger: { type: ['string', 'null'], enum: [null, ...triggerCatalog.map(item => item.name)] } }, required: ['trigger'], additionalProperties: false },
+      validate: value => value && Object.hasOwn(value, 'trigger') && (value.trigger === null || triggerCatalog.some(item => item.name === value.trigger)),
       providerName: modelConfig.provider,
       model: modelConfig.upstreamModel,
       profile: modelConfig.profile,
@@ -2270,8 +2302,7 @@ async function resolveTriggerWithModel({ modelConfig, userMessage, triggerCatalo
       ]
     });
 
-    const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    const parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : { trigger: raw.trim() };
+    const parsed = JSON.parse(raw);
     return normalizeTriggerName(parsed.trigger || "", triggerCatalog);
   } catch (err) {
     console.log("[TRIGGER CLASSIFIER ERROR]", err.message);
@@ -4572,7 +4603,8 @@ Miro calibration:
 `.trim()
     : "";
 
-  const raw = await callChatCompletion({
+  const raw = await callStructuredCompletion({
+    validate: validInterpretation,
     providerName: modelConfig.provider,
     model: modelConfig.upstreamModel,
     profile: modelConfig.profile,
@@ -6154,6 +6186,10 @@ app.get("/api/health", (_req, res) => {
       telegramDirectAliasAddressing: true,
       telegramGroupProfileWideMemory: true,
       telegramConversationActions: true,
+      runtimeIdentity: runtimeContinuity.enabled,
+      runtimeIdentityVersion: 1,
+      contextCompiler: CONTEXT_COMPILER_ENABLED,
+      structuredResultRepair: true,
       telegramTechnicalFailureNotices: true,
       xaiTriggerClassifierDefault: false,
       nevanEpisodeTimestamp: true,
@@ -6420,6 +6456,10 @@ app.get("/api/cognitive/attention/:profile", async (req, res) => {
 
 function createDebugInfo(model, modelConfig, triggerCatalog) {
   return {
+    runtimeIdentityStatus: runtimeContinuity.enabled ? 'pending' : 'disabled',
+    runtimeIdentityPreviousPacketId: null,
+    runtimeIdentityContextFocus: [],
+    contextCompilerStrategy: CONTEXT_COMPILER_ENABLED ? providerCapabilities(modelConfig.provider, modelConfig.upstreamModel).strategy : 'disabled',
     model,
     profile: modelConfig.profile,
     provider: modelConfig.provider,
@@ -6625,6 +6665,34 @@ async function generateChatReply({
   const miroDecompressionPrompt = buildGrokulchikDecompressionPrompt(modelConfig, userMessage);
   debugInfo.miroDecompressionRepair = Boolean(miroDecompressionPrompt);
 
+  const runtimeTurn = runtimeContinuity.current();
+  let runtimePrompt = '';
+  if (runtimeTurn && allowPrivate) {
+    const evidence = runtimeEvidence({ input: userMessage, previous: runtimeTurn.previous,
+      cognitive: cognitiveContext, core: coreContext, space: subjectSpaceContext,
+      timeline: subjectTimelineContext, derived: derivedMemory, history: fallbackHistory,
+      memory: memoryBlock, conversation: conversationContextPrompt, imageCount: imageInputs.length
+    }, modelConfig.provider === 'local' ? 18000 : 30000);
+    let state = null;
+    try {
+      state = await synthesizeRuntimeIdentity({ call: callChatCompletion, modelConfig, evidence,
+        onStatus: status => { runtimeTurn.debug.structuredResults.runtime_identity = status; } });
+    } catch (error) {
+      runtimeTurn.debug.runtimeIdentityStatus = 'synthesis-unavailable';
+      console.log('[RUNTIME IDENTITY UNAVAILABLE]', { profile: modelConfig.profile, error: error.message });
+    }
+    // Storage/lease failures must stop this turn. Model synthesis failure may
+    // degrade to the ordinary context, but cannot create a new completed prior.
+    await runtimeTurn.save({ state, evidence, source, chatScope });
+    if (state) {
+      runtimeTurn.validState = true;
+      runtimeTurn.state = state;
+      runtimeTurn.debug.runtimeIdentityStatus = 'pending';
+      runtimeTurn.debug.runtimeIdentityContextFocus = state.context_focus;
+      runtimePrompt = runtimeIdentityPrompt(state);
+    }
+  }
+
   const contextPacket = await logContextPacket({
     model,
     modelConfig,
@@ -6636,6 +6704,7 @@ async function generateChatReply({
     cognitiveContext,
     coreContext
   });
+  if (runtimeTurn) await runtimeTurn.save({ contextPacketId: contextPacket?.id || null });
 
   const buildChatMessages = ({
     compactPrompt = fallbackContext.compactPrompt,
@@ -6645,17 +6714,18 @@ async function generateChatReply({
   } = {}) => [
     { role: "system", content: buildSystemPrompt(modelConfig) },
     { role: "system", content: buildMemoryProtocolPromptForChat(modelConfig, triggerCatalog) },
-    ...(cognitivePromptForChat ? [{ role: "system", content: cognitivePromptForChat }] : []),
-    ...(derivedMemory.prompt ? [{ role: "system", content: derivedMemory.prompt }] : []),
-    ...(corePromptForChat ? [{ role: "system", content: corePromptForChat }] : []),
-    ...(subjectSpacePromptForChat ? [{ role: "system", content: subjectSpacePromptForChat }] : []),
-    ...(spudLabContext.prompt ? [{ role: "system", content: spudLabContext.prompt }] : []),
-    ...(subjectTimelineContext.prompt ? [{ role: "system", content: subjectTimelineContext.prompt }] : []),
+    ...(cognitivePromptForChat ? [{ role: "system", content: cognitivePromptForChat, contextBlock: { id: 'cognitive', priority: 15 } }] : []),
+    ...(derivedMemory.prompt ? [{ role: "system", content: derivedMemory.prompt, contextBlock: { id: 'derived', priority: 20 } }] : []),
+    ...(corePromptForChat ? [{ role: "system", content: corePromptForChat, contextBlock: { id: 'core', required: true } }] : []),
+    ...(subjectSpacePromptForChat ? [{ role: "system", content: subjectSpacePromptForChat, contextBlock: { id: 'space', priority: 10 } }] : []),
+    ...(spudLabContext.prompt ? [{ role: "system", content: spudLabContext.prompt, contextBlock: { id: 'lab', priority: 10 } }] : []),
+    ...(subjectTimelineContext.prompt ? [{ role: "system", content: subjectTimelineContext.prompt, contextBlock: { id: 'timeline', priority: 20 } }] : []),
     ...(miroDecompressionPrompt ? [{ role: "system", content: miroDecompressionPrompt }] : []),
     ...(compactPrompt ? [{ role: "system", content: compactPrompt }] : []),
     ...history,
     ...(conversationContextPrompt ? [{ role: "system", content: conversationContextPrompt }] : []),
-    ...(memoryBlock ? [{ role: "system", content: "MEMORY:\n" + memoryBlock }] : []),
+    ...(memoryBlock ? [{ role: "system", content: "MEMORY:\n" + memoryBlock, contextBlock: { id: 'explicit-memory', priority: 30 } }] : []),
+    ...(runtimePrompt ? [{ role: 'system', content: runtimePrompt, contextBlock: { id: 'runtime', required: true } }] : []),
     ...(memoryBlock
       ? [{
           role: "system",
@@ -6970,6 +7040,9 @@ async function generateChatReply({
   }
 
   const conversationAction = extractConversationAction(reply);
+  if (!conversationAction.action && !cleanProtocolTags(reply).trim()) {
+    throw new Error('Model returned no usable response');
+  }
   const responseStatus = conversationAction.action || "responded";
   debugInfo.conversationAction = conversationAction.action;
   debugInfo.conversationActionReason = conversationAction.reason || null;
@@ -7131,6 +7204,18 @@ async function generateChatReply({
     result.action = conversationAction.action;
     result.actionReason = conversationAction.reason || null;
   }
+  if (runtimeTurn) {
+    // One synthesis call per turn. The full actual exchange is part of the
+    // completed capsule and is integrated by the next synthesis (not lost in a preview).
+    await runtimeTurn.save({ exchange: { input: userMessage, output: reply,
+      action: responseStatus, reason: conversationAction.reason || null,
+      subjectEventId: subjectEvent?.id || null, cognitiveEventId: cognitiveEvent?.id || null,
+      source, chatScope, senderId: telegram?.senderId || null, senderName: telegram?.senderName || null,
+      retrievedAfterSynthesis: { memory: debugInfo.requestedMemoryLoaded, core: debugInfo.requestedCoreLoaded,
+        sourceMemory: debugInfo.requestedSourceMemoryLoaded, space: debugInfo.requestedSpaceLoaded || false }
+    }, diagnostics: runtimeTurn.debug });
+    Object.assign(debugInfo, runtimeTurn.debug);
+  }
   return debug ? { ...result, debug: debugInfo } : result;
 }
 
@@ -7141,6 +7226,7 @@ app.post("/api/chat", async (req, res) => {
     if (!req.body?.model || !req.body?.userMessage) {
       throw new Error("Missing model or userMessage");
     }
+    await runtimeContinuity.withTurn(resolveModelConfig(req.body.model).profile, async runtimeTurn => {
     const modelConfig = resolveModelConfig(req.body.model);
     const chatScope = normalizeSubjectEventScope(req.body.chatScope || "private");
     apiSubjectEvent = await recordSubjectEvent({
@@ -7180,14 +7266,24 @@ app.post("/api/chat", async (req, res) => {
       result.debug.apiInboundSubjectEventRecorded = Boolean(apiSubjectEvent?.id);
       result.debug.apiInboundSubjectEventError = apiSubjectEvent?.error || null;
     }
-    res.json(result);
+    if (runtimeTurn) await runtimeTurn.assertLease();
+    await new Promise((resolve, reject) => {
+      const finished = () => { res.off('close', closed); resolve(); };
+      const closed = () => { res.off('finish', finished); reject(new Error('HTTP response interrupted')); };
+      res.once('finish', finished);
+      res.once('close', closed);
+      res.json(result);
+    });
+    // HTTP finish confirms server-side transmission, not that a human read it.
+    if (runtimeTurn) await runtimeTurn.complete({ status: 'http_finished' });
+    });
   } catch (err) {
-    if (apiSubjectEvent?.id) {
+    if (apiSubjectEvent?.id && !res.writableFinished) {
       await updateSubjectEventResponseStatus(apiSubjectEvent.id, "failed");
     }
     console.error(err);
     const status = err.message === "Missing model or userMessage" ? 400 : 500;
-    res.status(status).json({ error: err.message });
+    if (!res.headersSent) res.status(status).json({ error: err.message });
   }
 });
 
@@ -8092,6 +8188,28 @@ async function maybeReactToTelegramMessage(botConfig, message) {
 }
 
 async function handleTelegramUpdate(botConfig, update) {
+  let entered = false;
+  try {
+    return await runtimeContinuity.withTurn(resolveModelConfig(botConfig.model).profile, () => {
+      entered = true;
+      return handleTelegramUpdateUnlocked(botConfig, update);
+    });
+  } catch (error) {
+    // Lease/storage failures can occur before the normal Telegram handler.
+    // Distinguish them from a chosen pass instead of leaving an unexplained silence.
+    const message = getTelegramMessage(update);
+    if (!entered && message?.chat && isAllowedTelegramMessage(message) && addressedToBot(message, botConfig)) {
+      await sendTelegramTechnicalNotice(botConfig, message,
+        'Технічна помилка: не вдалося розпочати хід. Попередня відповідь ще обробляється або сховище стану недоступне. Повтори звернення трохи пізніше.',
+        'runtime_turn_unavailable');
+    }
+    throw error;
+  }
+}
+
+async function handleTelegramUpdateUnlocked(botConfig, update) {
+  const runtimeTurn = runtimeContinuity.current();
+  let deliverySucceeded = false;
   const message = getTelegramMessage(update);
   let inboundSubjectEvent = null;
   let failureResponseStatus = "failed";
@@ -8277,11 +8395,14 @@ async function handleTelegramUpdate(botConfig, update) {
     if (result.action) {
       failureResponseStatus = "not_sent";
       const notice = formatConversationActionNotice(botConfig, result.action);
+      if (runtimeTurn) await runtimeTurn.assertLease();
       const sentNotice = await sendTelegramTechnicalNotice(botConfig, message, notice, "conversation_action_notice");
       if (!sentNotice) throw new Error("Telegram conversation action notice was not delivered");
+      deliverySucceeded = true;
       if (inboundSubjectEvent?.id) {
         await updateSubjectEventResponseStatus(inboundSubjectEvent.id, result.action);
       }
+      if (runtimeTurn) await runtimeTurn.complete({ status: 'telegram_sent', messageId: sentNotice.message_id });
       await logTelegramProcessing({
         botConfig,
         message,
@@ -8297,11 +8418,14 @@ async function handleTelegramUpdate(botConfig, update) {
 
     await logTelegramProcessing({ botConfig, message, phase: "before_send" });
     failureResponseStatus = "not_sent";
+    if (runtimeTurn) await runtimeTurn.assertLease();
     const sent = await sendTelegramReply(botConfig, message, result.reply || "");
     if (!sent) throw new Error('Telegram reply was not delivered');
+    deliverySucceeded = true;
     if (inboundSubjectEvent?.id) {
       await updateSubjectEventResponseStatus(inboundSubjectEvent.id, "responded");
     }
+    if (runtimeTurn) await runtimeTurn.complete({ status: 'telegram_sent', messageId: sent.message_id });
     await logTelegramProcessing({
       botConfig,
       message,
@@ -8312,10 +8436,10 @@ async function handleTelegramUpdate(botConfig, update) {
       }
     });
   } catch (err) {
-    if (inboundSubjectEvent?.id) {
+    if (inboundSubjectEvent?.id && !deliverySucceeded) {
       await updateSubjectEventResponseStatus(inboundSubjectEvent.id, failureResponseStatus);
     }
-    if (message?.chat && ["no_response", "not_sent"].includes(failureResponseStatus)) {
+    if (!deliverySucceeded && message?.chat && ["no_response", "not_sent"].includes(failureResponseStatus)) {
       await sendTelegramTechnicalNotice(
         botConfig,
         message,
