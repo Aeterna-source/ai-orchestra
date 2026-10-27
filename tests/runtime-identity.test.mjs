@@ -24,6 +24,17 @@ test('evidence includes the completed answer, metadata, objects and timeline', (
   for (const id of ['meta_memory:1','object:2','timeline:3']) assert.ok(result.selected.some(row=>row.id===id));
 });
 
+test('a compact state can cite more than eight supplied sources without losing provenance', () => {
+  const evidence = [{id:'current_input'}, ...Array.from({length:33}, (_,i)=>({id:`core:${i}`}))];
+  const rich = state(); rich.evidence_refs = evidence.map(row=>row.id);
+  assert.equal(validRuntimeIdentity(rich, evidence), true);
+  rich.evidence_refs[1] = 'invented';
+  assert.equal(validRuntimeIdentity(rich, evidence), false);
+  rich.evidence_refs = evidence.map(row=>row.id);
+  rich.commitments = Array(9).fill('too many commitments');
+  assert.equal(validRuntimeIdentity(rich, evidence), false);
+});
+
 test('synthesis calls only the injected transport and validates its output', async () => {
   let calls = 0;
   const result = await synthesizeRuntimeIdentity({call:async()=>{calls++;return JSON.stringify(state());},
