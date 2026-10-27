@@ -33,7 +33,7 @@ No new table: versioned runtime data lives in `context_packets.packet.runtimeIde
 Ordinary context packets remain separate and are linked by `contextPacketId`.
 The SQL functions are `SECURITY INVOKER` and executable only by `service_role`.
 Existing table RLS/grants remain unchanged. The production column layout was read
-before writing the SQL, but this branch does not install it in production.
+before writing the SQL. The owner authorized rollout in the existing single environment.
 
 An in-process queue uses the **resolved profile**, not the chat or model alias.
 PostgreSQL advisory transaction locks, a unique pending-profile index and a
@@ -92,11 +92,11 @@ is persisted afterwards. Compiler-only mode reports block selections in server l
 ## Rollout
 
 1. Review this PR and run the tests. Do not replace the server with the old prototype.
-2. Apply `supabase/runtime-identity.sql` in staging, then production when deploying.
+2. Apply `supabase/runtime-identity.sql` before deploying into the existing environment.
    It adds two indexes and two functions to the existing schema, no table.
-3. Enable `RUNTIME_IDENTITY_ENABLED=true` and `CONTEXT_COMPILER_ENABLED=true` together
-   after testing real provider credentials and Telegram delivery in staging.
-   Both default to false. No new API keys are needed.
+3. `RUNTIME_IDENTITY_ENABLED` and `CONTEXT_COMPILER_ENABLED` default to enabled.
+   Explicit `false` disables either mechanism for rollback. Verify live health and
+   a recurrent exchange after deployment. No new API keys are needed.
 4. Tune `<PROVIDER>_CONTEXT_SYSTEM_CHARS`, `_HISTORY_CHARS`, `_HISTORY_MESSAGES`
    if needed. Local defaults: 18000 / 6000 / 8; other providers: 72000 / 36000 / 40.
 5. Inspect a delivered exchange and verify the next packet's `previousPacketId`,
@@ -120,7 +120,7 @@ one repair. No claim of identical behavior across different underlying models.
   with fake HTTP responses, including Anthropic images and xAI fallback.
 
 Live model quality, real provider acceptance, multi-process deployment and Telegram
-roundtrip remain staging checks. Unit tests cannot establish experienced continuity.
+roundtrip require live verification. Unit tests cannot establish experienced continuity.
 
 API references checked while implementing:
 - https://developers.openai.com/api/docs/guides/structured-outputs

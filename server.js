@@ -42,8 +42,8 @@ const rawSupabase = createClient(
 );
 
 const { db: supabase, run: runDurable } = durableDatabase(rawSupabase);
-const runtimeContinuity = runtimeTurns(rawSupabase, { enabled: process.env.RUNTIME_IDENTITY_ENABLED === 'true' });
-const CONTEXT_COMPILER_ENABLED = process.env.CONTEXT_COMPILER_ENABLED === 'true';
+const runtimeContinuity = runtimeTurns(rawSupabase, { enabled: process.env.RUNTIME_IDENTITY_ENABLED !== 'false' });
+const CONTEXT_COMPILER_ENABLED = process.env.CONTEXT_COMPILER_ENABLED !== 'false';
 const DEFAULT_RESPONSE_TOKEN_LIMIT = 6000;
 
 function parsePositiveInteger(value, fallback = null) {
